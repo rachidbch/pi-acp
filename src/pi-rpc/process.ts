@@ -132,8 +132,8 @@ export class PiRpcProcess {
 
     // Without a listener, an EPIPE on stdin (e.g. pi died mid-write) crashes the whole
     // adapter with an unhandled 'error' event. The write callback still reports the
-    // error to the pending request.
-    child.stdin.on('error', () => {})
+    // error to the pending request. Optional call: minimal test fakes omit stdin.on.
+    child.stdin.on?.('error', () => {})
 
     // RPC records are LF-delimited; U+2028/U+2029 inside JSON strings are content,
     // but node's readline splits on those too, silently corrupting otherwise valid
@@ -168,9 +168,7 @@ export class PiRpcProcess {
       if (this.startupEvents !== null) {
         this.startupEventBytes += Buffer.byteLength(line, 'utf8')
         if (this.startupEvents.length >= STARTUP_EVENT_MAX_COUNT || this.startupEventBytes > STARTUP_EVENT_MAX_BYTES) {
-          this.fail(
-            new Error('pi startup event buffer exceeded limit (1024 events / 4 MiB); refusing to drop events')
-          )
+          this.fail(new Error('pi startup event buffer exceeded limit (1024 events / 4 MiB); refusing to drop events'))
           this.dispose('SIGKILL')
           return
         }

@@ -51,7 +51,8 @@ test('PiRpcProcess requests fail fast after the pi child exits', { skip: process
   assert.match(String(error), /pi process exited/)
 })
 
-test('PiRpcProcess frames RPC records on LF only, keeping U+2028/U+2029 content intact',
+test(
+  'PiRpcProcess frames RPC records on LF only, keeping U+2028/U+2029 content intact',
   { skip: process.platform === 'win32' },
   async t => {
     const proc = await PiRpcProcess.spawn({ cwd, piCommand: fixture })
@@ -70,7 +71,8 @@ test('PiRpcProcess frames RPC records on LF only, keeping U+2028/U+2029 content 
   }
 )
 
-test('PiRpcProcess replays events emitted before the first subscriber',
+test(
+  'PiRpcProcess replays events emitted before the first subscriber',
   { skip: process.platform === 'win32' },
   async t => {
     process.env.FAKE_PI_STARTUP_EVENTS = '1'
@@ -91,7 +93,8 @@ test('PiRpcProcess replays events emitted before the first subscriber',
   }
 )
 
-test('PiRpcProcess rejects pending requests on invalid RPC responses',
+test(
+  'PiRpcProcess rejects pending requests on invalid RPC responses',
   { skip: process.platform === 'win32' },
   async t => {
     process.env.FAKE_PI_BAD_RESPONSE = '1'
@@ -106,7 +109,8 @@ test('PiRpcProcess rejects pending requests on invalid RPC responses',
   }
 )
 
-test('PiRpcProcess spawn fails when startup events overflow the buffer',
+test(
+  'PiRpcProcess spawn fails when startup events overflow the buffer',
   { skip: process.platform === 'win32' },
   async t => {
     process.env.FAKE_PI_FLOOD = '1'

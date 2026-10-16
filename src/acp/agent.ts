@@ -103,11 +103,12 @@ function builtinAvailableCommands(): AvailableCommand[] {
 }
 
 function mergeCommands(a: AvailableCommand[], b: AvailableCommand[]): AvailableCommand[] {
-  // Preserve order, de-dupe by name (first wins).
+  // The second argument carries the adapter built-ins, which are dispatched first;
+  // their advertised descriptions must also win on name conflicts.
   const out: AvailableCommand[] = []
   const seen = new Set<string>()
 
-  for (const c of [...a, ...b]) {
+  for (const c of [...b, ...a]) {
     if (seen.has(c.name)) continue
     seen.add(c.name)
     out.push(c)

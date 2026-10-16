@@ -51,10 +51,7 @@ process.stdin.on('data', chunk => {
       )
     } else if (msg.type === 'get_commands') {
       if (process.env.FAKE_PI_BAD_RESPONSE) {
-        writeSync(
-          1,
-          JSON.stringify({ type: 'response', id: msg.id, command: 'get_commands', success: 'sure' }) + '\n'
-        )
+        writeSync(1, JSON.stringify({ type: 'response', id: msg.id, command: 'get_commands', success: 'sure' }) + '\n')
       } else {
         // JSON.stringify keeps U+2028 raw inside strings and node's readline splits on
         // it; this event exercises LF-only framing.
@@ -79,8 +76,13 @@ process.stdin.on('data', chunk => {
     } else if (msg.type === 'get_messages') {
       writeSync(
         1,
-        JSON.stringify({ type: 'response', id: msg.id, command: 'get_messages', success: true, data: { messages: [] } }) +
-          '\n'
+        JSON.stringify({
+          type: 'response',
+          id: msg.id,
+          command: 'get_messages',
+          success: true,
+          data: { messages: [] }
+        }) + '\n'
       )
       process.exit(3)
     } else {
