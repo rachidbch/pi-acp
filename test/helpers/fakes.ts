@@ -6,6 +6,10 @@ type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 export class FakeAgentSideConnection {
   readonly updates: SessionUpdateMsg[] = []
   readonly permissionRequests: unknown[] = []
+  private readonly abortController = new AbortController()
+  get signal(): AbortSignal {
+    return this.abortController.signal
+  }
   nextPermissionResponse: { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } } = {
     outcome: { outcome: 'selected', optionId: 'allow' }
   }

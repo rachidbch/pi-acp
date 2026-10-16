@@ -264,8 +264,8 @@ test('PiAcpSession: cancels unsupported input and editor extension UI requests w
     { id: 'ui-4', cancelled: true }
   ])
   assert.equal(conn.updates.length, 2)
-  assert.match((conn.updates[0]!.update as any).content.text, /input UI request is not supported/)
-  assert.match((conn.updates[1]!.update as any).content.text, /editor UI request is not supported/)
+  assert.match((conn.updates[0]!.update as any).content.text, /input UI request cancelled/)
+  assert.match((conn.updates[1]!.update as any).content.text, /editor UI request cancelled/)
 })
 
 test('PiAcpSession: emits agent_message_chunk for auto_retry_start with attempt/maxAttempts and rounded delay', async () => {
@@ -870,7 +870,7 @@ test('PiAcpSession: tags extension notify chunks with severity in _meta', async 
     content: { type: 'text', text: 'MCP: connection failed' },
     _meta: { piAcp: { notify: { level: 'error' } } }
   })
-  assert.deepEqual(proc.extensionUiResponses[0], { id: 'n1', cancelled: true })
+  assert.deepEqual(proc.extensionUiResponses, [])
 })
 
 test('PiAcpSession: defaults notify severity to info when notifyType is absent', async () => {

@@ -4,6 +4,7 @@ import {
   type AgentSideConnection,
   type AuthenticateRequest,
   type CancelNotification,
+  type ClientCapabilities,
   type InitializeRequest,
   type InitializeResponse,
   type ListSessionsRequest,
@@ -125,6 +126,7 @@ export class PiAcpAgent implements ACPAgent {
   private readonly conn: AgentSideConnection
   private readonly sessions = new SessionManager()
   private readonly store = new SessionStore()
+  private clientCapabilities: ClientCapabilities = {}
   private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
 
   dispose(): void {
@@ -221,7 +223,8 @@ export class PiAcpAgent implements ACPAgent {
         conn: this.conn,
         proc,
         fileCommands,
-        mcpInjection
+        mcpInjection,
+        clientCapabilities: this.clientCapabilities
       })
 
       this.lastSessionCwd = cwd
@@ -243,6 +246,7 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
+    this.clientCapabilities = params.clientCapabilities ?? {}
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
     const requested = params.protocolVersion
@@ -295,7 +299,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      clientCapabilities: this.clientCapabilities
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.
