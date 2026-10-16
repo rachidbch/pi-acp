@@ -61,7 +61,7 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
       terminal_output: { terminal_id: 'call_1', data: 'hello from bash' },
       terminal_exit: { terminal_id: 'call_1', exit_code: 0, signal: null }
     })
-    assert.equal(toolCallUpdate.rawOutput, undefined)
+    assert.deepEqual(toolCallUpdate.rawOutput.content, [{ type: 'text', text: 'hello from bash' }])
   } finally {
     PiRpcProcess.spawn = originalSpawn
   }

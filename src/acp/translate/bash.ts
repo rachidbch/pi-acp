@@ -48,9 +48,11 @@ export function bashResultText(result: unknown): string {
   const content = record?.content
   if (Array.isArray(content)) {
     const texts = content
-      .map(c => {
-        const block = c as { type?: unknown; text?: unknown }
-        return block.type === 'text' && typeof block.text === 'string' ? block.text : ''
+      .map((block: unknown) => {
+        if (typeof block !== 'object' || block === null) return ''
+        return 'type' in block && block.type === 'text' && 'text' in block && typeof block.text === 'string'
+          ? block.text
+          : ''
       })
       .filter(Boolean)
     if (texts.length) return texts.join('')

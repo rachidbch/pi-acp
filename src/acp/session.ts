@@ -33,7 +33,7 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { toolResultToContent } from './translate/pi-tools.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -572,6 +572,10 @@ export class PiAcpSession {
     })
   }
 
+  richToolContent(result: unknown): ReturnType<typeof toolResultToContent> {
+    return toolResultToContent(result)
+  }
+
   private emitBashOutputUpdate(params: {
     toolCallId: string
     status: 'in_progress' | 'completed' | 'failed'
@@ -835,15 +839,13 @@ export class PiAcpSession {
           break
         }
 
-        const text = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
+        const content = this.fileMutationToolCallIds.has(toolCallId) ? [] : this.richToolContent(partial)
 
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: 'in_progress',
-          content: text
-            ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
-            : undefined,
+          content: content.length ? content : undefined,
           ...(this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: partial })
         })
         break
@@ -865,8 +867,6 @@ export class PiAcpSession {
           this.cleanupToolCall(toolCallId)
           break
         }
-
-        const text = toolResultToText(result)
 
         const snapshot = this.fileSnapshots.get(toolCallId)
         let content: ToolCallContent[] | undefined
@@ -892,8 +892,9 @@ export class PiAcpSession {
           }
         }
 
-        if (!content && !hasStructuredDiff && text) {
-          content = [{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[]
+        if (!content && !hasStructuredDiff) {
+          const resultContent = this.richToolContent(result)
+          if (resultContent.length) content = resultContent
         }
 
         this.emit({
