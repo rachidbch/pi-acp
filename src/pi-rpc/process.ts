@@ -515,13 +515,19 @@ export class PiRpcProcess {
 
   /**
    * Latch the first terminal failure, reject everything pending, and make every
-   * later request fail fast instead of writing to a dead child.
+   * later request fail fast instead of writing to a dead child. Event handlers
+   * are notified once so upper layers can surface the failure to the client.
    */
   private fail(error: Error): void {
+    const firstFailure = !this.terminalError
     this.terminalError ??= error
     this.startupEvents = null
     this.startupEventBytes = 0
     for (const [, pending] of this.pending) pending.reject(this.terminalError)
     this.pending.clear()
+    if (firstFailure) {
+      for (const handler of this.eventHandlers)
+        handler({ type: 'pi_acp_process_error', message: this.terminalError.message })
+    }
   }
 }

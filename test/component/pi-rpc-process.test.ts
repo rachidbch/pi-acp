@@ -122,6 +122,24 @@ test(
   }
 )
 
+test('PiRpcProcess notifies event handlers when the child dies', { skip: process.platform === 'win32' }, async t => {
+  const proc = await PiRpcProcess.spawn({ cwd, piCommand: fixture })
+  t.after(() => proc.dispose())
+
+  const events: PiRpcEvent[] = []
+  proc.onEvent(ev => events.push(ev))
+
+  await proc.getMessages()
+
+  const deadline = Date.now() + 2_000
+  while (!events.some(ev => ev.type === 'pi_acp_process_error') && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 10))
+  }
+  const error = events.find(ev => ev.type === 'pi_acp_process_error') as { message?: string } | undefined
+  assert.ok(error, 'expected a pi_acp_process_error event after child exit')
+  assert.match(String(error.message), /pi process exited/)
+})
+
 test('PiRpcProcess request timeouts are tagged with ETIMEDOUT', { skip: process.platform === 'win32' }, async t => {
   const proc = await PiRpcProcess.spawn({ cwd, piCommand: fixture })
   t.after(() => proc.dispose())
