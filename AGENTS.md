@@ -72,6 +72,8 @@ For real validation, test with an ACP client (e.g. Zed external agent).
 ## Client information
 
 - Current ACP client is Zed
+- Session sweeps must preserve in-flight and queued turns when a client shares one connection across threads.
+- Quiet active turns send a keepalive every 75 seconds (`PI_ACP_KEEPALIVE_MS`; `0` disables it). `scripts/repro-newsession-cascade.mjs` checks the sweep regression end-to-end.
 
 ## References
 

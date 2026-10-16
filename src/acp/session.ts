@@ -170,6 +170,14 @@ function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCal
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
 }
 
+const KEEPALIVE_DEFAULT_INTERVAL_MS = 75_000
+
+function keepaliveIntervalMs(): number {
+  const raw = Number(process.env.PI_ACP_KEEPALIVE_MS)
+  if (!Number.isFinite(raw) || raw < 0) return KEEPALIVE_DEFAULT_INTERVAL_MS
+  return raw
+}
+
 export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
   private readonly store = new SessionStore()
@@ -192,17 +200,18 @@ export class SessionManager {
     const s = this.sessions.get(sessionId)
     if (!s) return
     try {
-      s.proc.dispose?.()
+      s.dispose()
     } catch {
       // ignore
     }
     this.sessions.delete(sessionId)
   }
 
-  /** Close all sessions except the one with `keepSessionId`. */
-  closeAllExcept(keepSessionId: string): void {
-    for (const [id] of this.sessions) {
+  /** Reclaim idle sessions without interrupting other threads' active turns. */
+  closeIdleExcept(keepSessionId: string): void {
+    for (const [id, session] of this.sessions) {
       if (id === keepSessionId) continue
+      if (session.isTurnActive()) continue
       this.close(id)
     }
   }
@@ -335,6 +344,10 @@ export class PiAcpSession {
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
+  private disposed = false
+  private unsubscribe: (() => void) | undefined
+  private keepaliveTimer: NodeJS.Timeout | null = null
+  private lastUpdateSentAt = Date.now()
 
   constructor(opts: {
     sessionId: string
@@ -357,7 +370,25 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
     this.initialTitlePending = opts.autoTitle ?? false
 
-    this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.unsubscribe = this.proc.onEvent(ev => {
+      if (!this.disposed) this.handlePiEvent(ev)
+    })
+  }
+
+  isTurnActive(): boolean {
+    return !this.disposed && (this.pendingTurn !== null || this.turnQueue.length > 0 || this.inAgentLoop)
+  }
+
+  dispose(reason: StopReason = 'cancelled'): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.stopKeepalive()
+    this.unsubscribe?.()
+    const turn = this.pendingTurn
+    this.pendingTurn = null
+    turn?.resolve(reason)
+    for (const queued of this.turnQueue.splice(0)) queued.resolve(reason)
+    this.proc.dispose()
   }
 
   setStartupInfo(text: string) {
@@ -381,6 +412,7 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = [], title?: string): Promise<StopReason> {
+    if (this.disposed) return 'cancelled'
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
@@ -390,6 +422,7 @@ export class PiAcpSession {
       // If a turn is already running, enqueue.
       if (this.pendingTurn || this.inAgentLoop) {
         this.turnQueue.push(queued)
+        this.ensureKeepalive()
 
         // Best-effort: notify client that a prompt was queued.
         // This doesn't work in Zed yet, needs to be revisited
@@ -491,6 +524,8 @@ export class PiAcpSession {
   }
 
   private emit(update: SessionUpdate): void {
+    if (this.disposed) return
+    this.lastUpdateSentAt = Date.now()
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
       .then(() =>
@@ -553,6 +588,7 @@ export class PiAcpSession {
   }
 
   private startNextTurn(): void {
+    if (this.disposed) return
     if (this.pendingTurn || this.inAgentLoop) return
     const next = this.turnQueue.shift()
     if (next) {
@@ -631,6 +667,7 @@ export class PiAcpSession {
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
+    this.ensureKeepalive()
 
     const turn: PendingTurn = {
       acknowledged: false,
@@ -685,6 +722,34 @@ export class PiAcpSession {
         })
         void err
       })
+  }
+
+  private ensureKeepalive(): void {
+    if (this.keepaliveTimer || this.disposed) return
+    const interval = keepaliveIntervalMs()
+    if (interval <= 0) return
+    this.keepaliveTimer = setInterval(
+      () => {
+        if (!this.isTurnActive()) {
+          this.stopKeepalive()
+          return
+        }
+        if (Date.now() - this.lastUpdateSentAt >= interval) {
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true, keepalive: true } }
+          })
+        }
+      },
+      Math.max(250, Math.round(interval / 3))
+    )
+    this.keepaliveTimer.unref?.()
+  }
+
+  private stopKeepalive(): void {
+    if (!this.keepaliveTimer) return
+    clearInterval(this.keepaliveTimer)
+    this.keepaliveTimer = null
   }
 
   private handlePiEvent(ev: PiRpcEvent) {

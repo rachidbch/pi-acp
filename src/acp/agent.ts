@@ -422,12 +422,13 @@ export class PiAcpAgent implements ACPAgent {
     if (preludeText)
       session.setStartupInfo(preludeText)
 
-      // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
-      // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
-      // It does NOT affect other client windows because they run in separate agent processes.
+      // Policy: within a single ACP connection, sweep idle sessions so unused pi
+      // subprocesses do not leak. Sessions with an in-flight turn are skipped:
+      // hosts like Air share one connection across several threads, and closing
+      // a busy session cancels that thread's conversation mid-turn.
       //
       // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
+    ;(this.sessions as any).closeIdleExcept?.(session.sessionId)
 
     const response = {
       sessionId: session.sessionId,
@@ -1016,9 +1017,10 @@ export class PiAcpAgent implements ACPAgent {
     const { configOptions, models, modes } = configuration
     const fileCommands = loadSlashCommands(params.cwd)
 
-    // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
+    // Sweep idle sessions within each ACP connection; busy ones are skipped
+    // (see newSession — hosts may share one connection across threads).
     // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
+    ;(this.sessions as any).closeIdleExcept?.(session.sessionId)
 
     // (Optional) ensure mapping stays fresh.
     this.store.upsert({

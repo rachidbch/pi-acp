@@ -39,11 +39,16 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  disposeCount = 0
   getSessionStatsCount = 0
 
   sessionStats: PiSessionStats = {}
   /** When set, `getSessionStats()` rejects with this error. */
   sessionStatsError: unknown = null
+
+  dispose(): void {
+    this.disposeCount++
+  }
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
