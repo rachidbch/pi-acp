@@ -83,6 +83,9 @@ const rpcResponseSchema = z.object({
   error: z.string().optional()
 })
 
+const promptResultSchema = z.object({ disposition: z.enum(['handled', 'started', 'queued']).optional() })
+export type PiPromptDisposition = NonNullable<z.infer<typeof promptResultSchema>['disposition']>
+
 const STARTUP_EVENT_MAX_COUNT = 1024
 const STARTUP_EVENT_MAX_BYTES = 4 * 1024 * 1024
 
@@ -521,9 +524,30 @@ export class PiRpcProcess {
     return lines
   }
 
-  async prompt(message: string, images: unknown[] = []): Promise<void> {
-    const res = await this.request({ type: 'prompt', message, images })
-    if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
+  async prompt(
+    message: string,
+    images: unknown[] = [],
+    timeoutMs?: number,
+    onDisposition?: (disposition: PiPromptDisposition | undefined) => void
+  ): Promise<PiPromptDisposition | undefined> {
+    let disposition: PiPromptDisposition | undefined
+    await this.request(
+      { type: 'prompt', message, images },
+      {
+        timeoutMs,
+        onResponse: res => {
+          if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
+          if (res.data !== undefined) {
+            const result = promptResultSchema.safeParse(res.data)
+            if (!result.success) throw new Error('pi prompt returned invalid disposition')
+            disposition = result.data.disposition
+          }
+          // Preserve wire order even when later agent events share this stdout chunk.
+          onDisposition?.(disposition)
+        }
+      }
+    )
+    return disposition
   }
 
   async abort(): Promise<void> {
@@ -630,7 +654,10 @@ export class PiRpcProcess {
     await this.writeLine(`${JSON.stringify({ type: 'extension_ui_response', ...response })}\n`)
   }
 
-  private request(cmd: PiRpcCommand, opts?: { timeoutMs?: number }): Promise<PiRpcResponse> {
+  private request(
+    cmd: PiRpcCommand,
+    opts?: { timeoutMs?: number; onResponse?: (response: PiRpcResponse) => void }
+  ): Promise<PiRpcResponse> {
     if (this.terminalError) return Promise.reject(this.terminalError)
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
@@ -653,8 +680,13 @@ export class PiRpcProcess {
 
       this.pending.set(id, {
         resolve: res => {
-          drop()
-          resolve(res)
+          if (!drop()) return
+          try {
+            opts?.onResponse?.(res)
+            resolve(res)
+          } catch (error) {
+            reject(error)
+          }
         },
         reject: error => {
           drop()
