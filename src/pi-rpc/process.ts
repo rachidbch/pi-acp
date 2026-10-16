@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import crossSpawn from 'cross-spawn'
+import { z } from 'zod'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
 export class PiRpcSpawnError extends Error {
@@ -69,6 +70,19 @@ type PiExtensionUiResponse =
 
 export type PiRpcEvent = Record<string, unknown>
 
+const rpcEventSchema = z.object({ type: z.string().min(1) }).passthrough()
+const rpcResponseSchema = z.object({
+  type: z.literal('response'),
+  id: z.string().optional(),
+  command: z.string(),
+  success: z.boolean(),
+  data: z.unknown().optional(),
+  error: z.string().optional()
+})
+
+const STARTUP_EVENT_MAX_COUNT = 1024
+const STARTUP_EVENT_MAX_BYTES = 4 * 1024 * 1024
+
 /** Maximum wait for an auxiliary context-usage update. */
 export const SESSION_STATS_TIMEOUT_MS = 1_000
 
@@ -109,6 +123,8 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private startupEvents: PiRpcEvent[] | null = []
+  private startupEventBytes = 0
   private terminalError: Error | undefined
 
   private constructor(child: ChildProcessWithoutNullStreams) {
@@ -124,7 +140,8 @@ export class PiRpcProcess {
     // NDJSON. Split on \n explicitly (with utf8 decoding across chunk boundaries).
     const onLine = (line: string) => {
       if (!line.trim()) return
-      let msg: any
+      if (this.terminalError) return
+      let msg: unknown
       try {
         msg = JSON.parse(line)
       } catch {
@@ -135,15 +152,33 @@ export class PiRpcProcess {
         return
       }
 
-      if (msg?.type === 'response') {
-        const id = typeof msg.id === 'string' ? msg.id : undefined
-        // `resolve` removes the pending entry. Responses for unknown or already timed-out
-        // ids are dropped: a response is never a pi event, so it must not be broadcast.
-        if (id !== undefined) this.pending.get(id)?.resolve(msg as PiRpcResponse)
+      const event = rpcEventSchema.safeParse(msg)
+      if (!event.success) return
+      if (event.data.type === 'response') {
+        const id = typeof event.data.id === 'string' ? event.data.id : undefined
+        // Responses for unknown or already timed-out ids are never session events.
+        if (id !== undefined) {
+          const response = rpcResponseSchema.safeParse(msg)
+          if (response.success) this.pending.get(id)?.resolve(response.data)
+          else this.pending.get(id)?.reject(new Error('pi returned an invalid RPC response'))
+        }
         return
       }
 
-      for (const h of this.eventHandlers) h(msg as PiRpcEvent)
+      if (this.startupEvents !== null) {
+        this.startupEventBytes += Buffer.byteLength(line, 'utf8')
+        if (this.startupEvents.length >= STARTUP_EVENT_MAX_COUNT || this.startupEventBytes > STARTUP_EVENT_MAX_BYTES) {
+          this.fail(
+            new Error('pi startup event buffer exceeded limit (1024 events / 4 MiB); refusing to drop events')
+          )
+          this.dispose('SIGKILL')
+          return
+        }
+        this.startupEvents.push(event.data)
+        return
+      }
+
+      for (const h of this.eventHandlers) h(event.data)
     }
 
     let stdoutRest = ''
@@ -257,15 +292,29 @@ export class PiRpcProcess {
           { code: 'ETIMEDOUT', cause: error }
         )
       }
-      // Unsupported or failed get_state remains best-effort.
+      // Unsupported or failed get_state remains best-effort, but terminal startup
+      // failures (process died, startup buffer exceeded) are not.
     }
+    if (proc.terminalError) throw proc.terminalError
 
     return proc
   }
 
+  /**
+   * The first subscriber synchronously receives the events emitted before it attached,
+   * in wire order; later subscribers receive live events only. Until the first
+   * subscription, exceeding 1024 buffered events or 4 MiB kills the process rather
+   * than dropping events (a dropped permission request would deadlock the session).
+   */
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     if (this.terminalError) throw this.terminalError
     this.eventHandlers.push(handler)
+    const startupEvents = this.startupEvents
+    this.startupEvents = null
+    this.startupEventBytes = 0
+    if (startupEvents) {
+      for (const event of startupEvents) handler(event)
+    }
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
     }
@@ -472,6 +521,8 @@ export class PiRpcProcess {
    */
   private fail(error: Error): void {
     this.terminalError ??= error
+    this.startupEvents = null
+    this.startupEventBytes = 0
     for (const [, pending] of this.pending) pending.reject(this.terminalError)
     this.pending.clear()
   }

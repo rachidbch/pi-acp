@@ -13,6 +13,13 @@ if (process.env.FAKE_PI_STARTUP_EVENTS) {
   writeSync(1, JSON.stringify({ type: 'session_start', data: 'early' }) + '\n')
 }
 
+// Overflows the pre-subscription event buffer (1024 events).
+if (process.env.FAKE_PI_FLOOD) {
+  for (let i = 0; i < 1025; i++) {
+    writeSync(1, JSON.stringify({ type: 'flood', n: i }) + '\n')
+  }
+}
+
 let answeredState = false
 let rest = ''
 process.stdin.setEncoding('utf8')
@@ -43,20 +50,32 @@ process.stdin.on('data', chunk => {
         }) + '\n'
       )
     } else if (msg.type === 'get_commands') {
-      // JSON.stringify keeps U+2028 raw inside strings and node's readline splits on
-      // it; this event exercises LF-only framing.
-      writeSync(
-        1,
-        JSON.stringify({
-          type: 'message_update',
-          assistantMessageEvent: { type: 'text_delta', delta: 'before\u2028after' }
-        }) + '\n'
-      )
-      writeSync(
-        1,
-        JSON.stringify({ type: 'response', id: msg.id, command: 'get_commands', success: true, data: { commands: [] } }) +
-          '\n'
-      )
+      if (process.env.FAKE_PI_BAD_RESPONSE) {
+        writeSync(
+          1,
+          JSON.stringify({ type: 'response', id: msg.id, command: 'get_commands', success: 'sure' }) + '\n'
+        )
+      } else {
+        // JSON.stringify keeps U+2028 raw inside strings and node's readline splits on
+        // it; this event exercises LF-only framing.
+        writeSync(
+          1,
+          JSON.stringify({
+            type: 'message_update',
+            assistantMessageEvent: { type: 'text_delta', delta: 'before\u2028after' }
+          }) + '\n'
+        )
+        writeSync(
+          1,
+          JSON.stringify({
+            type: 'response',
+            id: msg.id,
+            command: 'get_commands',
+            success: true,
+            data: { commands: [] }
+          }) + '\n'
+        )
+      }
     } else if (msg.type === 'get_messages') {
       writeSync(
         1,

@@ -70,6 +70,54 @@ test('PiRpcProcess frames RPC records on LF only, keeping U+2028/U+2029 content 
   }
 )
 
+test('PiRpcProcess replays events emitted before the first subscriber',
+  { skip: process.platform === 'win32' },
+  async t => {
+    process.env.FAKE_PI_STARTUP_EVENTS = '1'
+    t.after(() => {
+      delete process.env.FAKE_PI_STARTUP_EVENTS
+    })
+
+    // The fixture emits the event at boot; the spawn handshake finishes before any
+    // subscriber can attach.
+    const proc = await PiRpcProcess.spawn({ cwd, piCommand: fixture })
+    t.after(() => proc.dispose())
+
+    const events: PiRpcEvent[] = []
+    proc.onEvent(ev => events.push(ev))
+
+    assert.equal(events.length, 1)
+    assert.equal((events[0] as { type?: string }).type, 'session_start')
+  }
+)
+
+test('PiRpcProcess rejects pending requests on invalid RPC responses',
+  { skip: process.platform === 'win32' },
+  async t => {
+    process.env.FAKE_PI_BAD_RESPONSE = '1'
+    t.after(() => {
+      delete process.env.FAKE_PI_BAD_RESPONSE
+    })
+
+    const proc = await PiRpcProcess.spawn({ cwd, piCommand: fixture })
+    t.after(() => proc.dispose())
+
+    await assert.rejects(proc.getCommands(), /invalid RPC response/)
+  }
+)
+
+test('PiRpcProcess spawn fails when startup events overflow the buffer',
+  { skip: process.platform === 'win32' },
+  async t => {
+    process.env.FAKE_PI_FLOOD = '1'
+    t.after(() => {
+      delete process.env.FAKE_PI_FLOOD
+    })
+
+    await assert.rejects(PiRpcProcess.spawn({ cwd, piCommand: fixture }), /buffer exceeded limit/)
+  }
+)
+
 test('PiRpcProcess request timeouts are tagged with ETIMEDOUT', { skip: process.platform === 'win32' }, async t => {
   const proc = await PiRpcProcess.spawn({ cwd, piCommand: fixture })
   t.after(() => proc.dispose())
