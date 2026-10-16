@@ -110,9 +110,15 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private terminalError: Error | undefined
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
+
+    // Without a listener, an EPIPE on stdin (e.g. pi died mid-write) crashes the whole
+    // adapter with an unhandled 'error' event. The write callback still reports the
+    // error to the pending request.
+    child.stdin.on('error', () => {})
 
     const rl = readline.createInterface({ input: child.stdout })
     rl.on('line', line => {
@@ -140,14 +146,11 @@ export class PiRpcProcess {
     })
 
     child.on('exit', (code, signal) => {
-      const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
+      this.fail(new Error(`pi process exited (code=${code}, signal=${signal})`))
     })
 
     child.on('error', err => {
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
+      this.fail(err)
     })
   }
 
@@ -206,8 +209,17 @@ export class PiRpcProcess {
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
     }
 
-    child.stderr.on('data', () => {
-      // leave stderr untouched; ACP clients may capture it.
+    let stderrRest = ''
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      // Forward pi stderr to the adapter's stderr: ACP clients capture agent stderr
+      // (e.g. for their logs), and pi diagnostics (extension load failures, MCP errors)
+      // only surface there.
+      const text = stderrRest + chunk.toString()
+      const lines = text.split('\n')
+      stderrRest = lines.pop() ?? ''
+      for (const line of lines) {
+        if (line.trim()) process.stderr.write(`[pi] ${line}\n`)
+      }
     })
 
     const proc = new PiRpcProcess(child)
@@ -217,21 +229,29 @@ export class PiRpcProcess {
     // that is created lazily. Create the parent dir up-front to avoid later parse errors
     // when we call commands like export_html.
     try {
-      const state = (await proc.getState()) as any
+      const state = (await proc.getState(30_000)) as any
       const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
       if (sessionFile) {
         const { mkdirSync } = await import('node:fs')
         const { dirname } = await import('node:path')
         mkdirSync(dirname(sessionFile), { recursive: true })
       }
-    } catch {
-      // ignore for now
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ETIMEDOUT') {
+        proc.dispose()
+        throw new PiRpcSpawnError(
+          'Pi RPC did not become ready within 30 seconds. If a pi extension blocks startup, defer that work until a command or tool runs and try again.',
+          { code: 'ETIMEDOUT', cause: error }
+        )
+      }
+      // Unsupported or failed get_state remains best-effort.
     }
 
     return proc
   }
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
+    if (this.terminalError) throw this.terminalError
     this.eventHandlers.push(handler)
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
@@ -239,6 +259,7 @@ export class PiRpcProcess {
   }
 
   dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
+    this.fail(new Error('pi process disposed'))
     if (this.child.killed) return
     try {
       this.child.kill(signal as any)
@@ -266,8 +287,8 @@ export class PiRpcProcess {
     if (!res.success) throw new Error(`pi abort failed: ${res.error ?? JSON.stringify(res.data)}`)
   }
 
-  async getState(): Promise<unknown> {
-    const res = await this.request({ type: 'get_state' })
+  async getState(timeoutMs?: number): Promise<unknown> {
+    const res = await this.request({ type: 'get_state' }, { timeoutMs })
     if (!res.success) throw new Error(`pi get_state failed: ${res.error ?? JSON.stringify(res.data)}`)
     return res.data
   }
@@ -366,6 +387,7 @@ export class PiRpcProcess {
   }
 
   private request(cmd: PiRpcCommand, opts?: { timeoutMs?: number }): Promise<PiRpcResponse> {
+    if (this.terminalError) return Promise.reject(this.terminalError)
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
     const timeoutMs = opts?.timeoutMs
@@ -400,7 +422,7 @@ export class PiRpcProcess {
         timer = setTimeout(() => {
           timer = undefined
           if (!this.pending.delete(id)) return
-          reject(new Error(`pi ${cmd.type} timed out after ${timeoutMs}ms`))
+          reject(Object.assign(new Error(`pi ${cmd.type} timed out after ${timeoutMs}ms`), { code: 'ETIMEDOUT' }))
         }, timeoutMs)
         // Never let an auxiliary request keep the event loop alive.
         timer.unref?.()
@@ -414,6 +436,7 @@ export class PiRpcProcess {
   }
 
   private writeLine(line: string): Promise<void> {
+    if (this.terminalError) return Promise.reject(this.terminalError)
     return new Promise<void>((resolve, reject) => {
       try {
         this.child.stdin.write(line, error => {
@@ -428,5 +451,15 @@ export class PiRpcProcess {
         reject(error)
       }
     })
+  }
+
+  /**
+   * Latch the first terminal failure, reject everything pending, and make every
+   * later request fail fast instead of writing to a dead child.
+   */
+  private fail(error: Error): void {
+    this.terminalError ??= error
+    for (const [, pending] of this.pending) pending.reject(this.terminalError)
+    this.pending.clear()
   }
 }
