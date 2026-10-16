@@ -140,7 +140,7 @@ test('PiAcpAgent: switching the model config option refreshes context usage', as
   })
 })
 
-test('PiAcpAgent: unstable_setSessionModel refreshes context usage', async () => {
+test('PiAcpAgent: model config option refreshes context usage', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
   const state: { thinkingLevel: string; model: { provider: string; id: string } } = {
@@ -164,7 +164,7 @@ test('PiAcpAgent: unstable_setSessionModel refreshes context usage', async () =>
   const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
   ;(agent as any).sessions = new FakeSessions(session) as any
 
-  await agent.unstable_setSessionModel({ sessionId: 's1', modelId: 'test/beta' })
+  await agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: 'test/beta' })
 
   assert.equal(proc.getSessionStatsCount, 1)
   assert.deepEqual(

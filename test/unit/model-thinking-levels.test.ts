@@ -69,6 +69,15 @@ function assertUpdates(conn: FakeAgentSideConnection, level: string, levels: str
   )
 }
 
+test('model setter refreshes model-specific levels and current mode', async () => {
+  const { agent, conn } = fixture()
+  for (const model of ['plain', 'reasoning']) {
+    conn.updates.length = 0
+    await agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: `test/${model}` })
+    assertUpdates(conn, model === 'plain' ? 'off' : 'max', model === 'plain' ? ['off'] : ['low', 'high', 'max'])
+  }
+})
+
 for (const legacy of [false, true]) {
   for (const requested of ['max', 'xhigh', 'ordinary', ' mean ', ' ']) {
     test(`${legacy ? 'legacy' : 'config'} reasoning setter reports actual max for ${requested}`, async () => {
@@ -104,15 +113,6 @@ for (const legacy of [false, true]) {
     }
     assert.deepEqual(calls, ['ordinary'])
     assertUpdates(conn, 'mean', ['ordinary', 'mean'])
-  })
-  test(`${legacy ? 'legacy' : 'config'} model setter refreshes model-specific levels and current mode`, async () => {
-    const { agent, conn } = fixture()
-    for (const model of ['plain', 'reasoning']) {
-      conn.updates.length = 0
-      if (legacy) await agent.unstable_setSessionModel({ sessionId: 's1', modelId: `test/${model}` })
-      else await agent.setSessionConfigOption({ sessionId: 's1', configId: 'model', value: `test/${model}` })
-      assertUpdates(conn, model === 'plain' ? 'off' : 'max', model === 'plain' ? ['off'] : ['low', 'high', 'max'])
-    }
   })
   for (const failure of ['state', 'discovery', 'empty', 'non-string', 'inconsistent']) {
     test(`${legacy ? 'legacy' : 'config'} reasoning setter emits no success on ${failure} read failure`, async () => {

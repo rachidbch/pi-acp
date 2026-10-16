@@ -9,6 +9,7 @@ import type {
   RequestPermissionResponse,
   SessionUpdate
 } from '@agentclientprotocol/sdk'
+import { CreateElicitationRequest as elicitationRequestGuard } from '@agentclientprotocol/sdk'
 import { handleExtensionUiRequest, type ExtensionUiHost, type ExtensionUiResponse } from '../../src/acp/extension-ui.js'
 
 function fixture(capabilities?: ClientCapabilities) {
@@ -28,7 +29,7 @@ function fixture(capabilities?: ClientCapabilities) {
       permissions.push(request)
       return answers.permission()
     },
-    unstable_createElicitation: async (request: CreateElicitationRequest) => {
+    createElicitation: async (request: CreateElicitationRequest) => {
       forms.push(request)
       return answers.form()
     }
@@ -150,7 +151,7 @@ for (const [method, fields] of [
     const request = f.forms[0]
     assert.equal(request?.mode, 'form')
     assert.match(request?.message ?? '', /Do not enter passwords, tokens, or other secrets/)
-    if (request?.mode !== 'form') assert.fail('expected form')
+    if (!request || !elicitationRequestGuard.isForm(request)) assert.fail('expected form')
     assert.deepEqual(request.requestedSchema.required, ['value'])
     const field = request.requestedSchema.properties?.value
     assert.equal(field?.type, 'string')
@@ -314,7 +315,7 @@ test('cancellation queued just after a client answer still cancels rather than f
   const answer = new Promise<CreateElicitationResponse>(resolve => {
     resolveAnswer = resolve
   })
-  f.host.conn.unstable_createElicitation = () => answer
+  f.host.conn.createElicitation = () => answer
   const handling = f.run('input')
   resolveAnswer({ action: 'accept', content: { value: 'stale' } })
   queueMicrotask(() => f.session.abort())

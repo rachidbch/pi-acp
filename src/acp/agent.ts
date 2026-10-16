@@ -1,4 +1,5 @@
 import {
+  PROTOCOL_VERSION,
   RequestError,
   type Agent as ACPAgent,
   type AgentSideConnection,
@@ -250,7 +251,7 @@ export class PiAcpAgent implements ACPAgent {
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     this.clientCapabilities = params.clientCapabilities ?? {}
     // We currently only support ACP protocol version 1.
-    const supportedVersion = 1
+    const supportedVersion = PROTOCOL_VERSION
     const requested = params.protocolVersion
 
     const response: InitializeResponse = {
@@ -1196,13 +1197,6 @@ export class PiAcpAgent implements ACPAgent {
     this.store.delete(params.sessionId)
 
     return {}
-  }
-
-  async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
-    const session = await this.restoreSession(params.sessionId)
-    await setSessionModel(session.proc, params.modelId)
-    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
-    await session.publishContextUsage()
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {

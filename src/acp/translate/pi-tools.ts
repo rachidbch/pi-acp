@@ -1,6 +1,61 @@
-import type { ToolCallContent } from '@agentclientprotocol/sdk'
-import { zContentBlock } from '@agentclientprotocol/sdk/dist/schema/zod.gen.js'
+import type { ContentBlock, ToolCallContent } from '@agentclientprotocol/sdk'
 import { z } from 'zod'
+
+// Local mirror of the SDK's ContentBlock zod schema: the SDK no longer exports it.
+// The ZodType<ContentBlock> binding makes any drift from the SDK type a typecheck error.
+const zAnnotations = z
+  .object({
+    audience: z
+      .array(z.enum(['user', 'assistant']))
+      .nullable()
+      .optional(),
+    lastModified: z.string().nullable().optional(),
+    priority: z.number().min(0).max(1).nullable().optional()
+  })
+  .passthrough()
+  .nullable()
+  .optional()
+const zMeta = z.record(z.unknown()).nullable().optional()
+const zResourceContents = z.union([
+  z.object({ uri: z.string(), text: z.string(), mimeType: z.string().nullable().optional() }).passthrough(),
+  z.object({ uri: z.string(), blob: z.string(), mimeType: z.string().nullable().optional() }).passthrough()
+])
+const zContentBlock: z.ZodType<ContentBlock> = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('text'), text: z.string(), annotations: zAnnotations, _meta: zMeta }).passthrough(),
+  z
+    .object({
+      type: z.literal('image'),
+      data: z.string(),
+      mimeType: z.string(),
+      annotations: zAnnotations,
+      _meta: zMeta
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal('audio'),
+      data: z.string(),
+      mimeType: z.string(),
+      annotations: zAnnotations,
+      _meta: zMeta
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal('resource_link'),
+      uri: z.string(),
+      name: z.string(),
+      title: z.string().nullable().optional(),
+      description: z.string().nullable().optional(),
+      mimeType: z.string().nullable().optional(),
+      annotations: zAnnotations,
+      _meta: zMeta
+    })
+    .passthrough(),
+  z
+    .object({ type: z.literal('resource'), resource: zResourceContents, annotations: zAnnotations, _meta: zMeta })
+    .passthrough()
+])
 
 const outputSchema = z.object({
   stdout: z.unknown().optional(),
@@ -15,6 +70,20 @@ const resultSchema = outputSchema.extend({
   details: z.unknown().optional(),
   text: z.unknown().optional()
 })
+export const zToolCallContent: z.ZodType<ToolCallContent> = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('content'), content: zContentBlock, _meta: zMeta }).passthrough(),
+  z
+    .object({
+      type: z.literal('diff'),
+      path: z.string(),
+      oldText: z.string().nullable().optional(),
+      newText: z.string(),
+      _meta: zMeta
+    })
+    .passthrough(),
+  z.object({ type: z.literal('terminal'), terminalId: z.string(), _meta: zMeta }).passthrough()
+])
+
 const omittedContent = '[Unsupported or malformed tool content omitted.]'
 
 function textContent(text: string): ToolCallContent[] {

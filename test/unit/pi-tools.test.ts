@@ -1,7 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toolResultToContent, toolResultToText } from '../../src/acp/translate/pi-tools.js'
-import { zToolCallContent } from '@agentclientprotocol/sdk/dist/schema/zod.gen.js'
+import { toolResultToContent, toolResultToText, zToolCallContent } from '../../src/acp/translate/pi-tools.js'
 
 test('toolResultToText: extracts text from content blocks', () => {
   const text = toolResultToText({

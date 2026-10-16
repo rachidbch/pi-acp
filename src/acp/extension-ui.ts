@@ -5,6 +5,7 @@ import type {
   PermissionOption,
   SessionUpdate
 } from '@agentclientprotocol/sdk'
+import { CreateElicitationResponse } from '@agentclientprotocol/sdk'
 
 export type ExtensionUiResponse = { id: string } & ({ value: string } | { confirmed: boolean } | { cancelled: true })
 
@@ -118,7 +119,7 @@ export async function handleExtensionUiRequest(event: Record<string, unknown>, h
       ...(method === 'editor' && typeof event.prefill === 'string' ? { default: event.prefill } : {})
     }
     const result = await waitForDialog(event, host, () =>
-      host.conn.unstable_createElicitation({
+      host.conn.createElicitation({
         sessionId: host.sessionId,
         mode: 'form',
         message: options ? title : `${title}\n\n${SECRET_DISCLOSURE}`,
@@ -126,7 +127,7 @@ export async function handleExtensionUiRequest(event: Record<string, unknown>, h
       })
     )
     if (result.state === 'expired') return
-    if (result.state !== 'answered' || result.value.action !== 'accept') return await cancel()
+    if (result.state !== 'answered' || !CreateElicitationResponse.isAccept(result.value)) return await cancel()
     const value = result.value.content?.value
     if (typeof value !== 'string' || (options && !options.includes(value))) return await cancel()
     await reply({ id, value })
