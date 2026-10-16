@@ -256,7 +256,7 @@ export class PiAcpAgent implements ACPAgent {
     const response: InitializeResponse = {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
       agentInfo: {
-        name: pkg.name ?? 'pi-acp',
+        name: 'pi-acp',
         title: 'pi ACP adapter',
         version: pkg.version ?? '0.0.0'
       },

@@ -8,7 +8,7 @@ ACP ([Agent Client Protocol](https://agentclientprotocol.com/overview/introducti
 
 Fork of [svkozak/pi-acp](https://github.com/svkozak/pi-acp) with features upstream doesn't have. It follows upstream `main`; upstream changes are merged in, not rebased. The test suite runs on every change, and commits are kept small so upstream can cherry-pick individual pieces. In daily use with Zed and JetBrains Air.
 
-Install with `npm install -g github:razorbackdb/pi-acp`; the `prepare` script builds the bundle. Then point your ACP client's agent-server command at the installed `pi-acp`.
+Install with `npm install -g @razorbackdb/pi-acp`, then point your ACP client's agent-server command at the installed `pi-acp` binary. A git install works too (`npm install -g github:razorbackdb/pi-acp`); the `prepare` script builds the bundle.
 
 ### What this fork adds
 

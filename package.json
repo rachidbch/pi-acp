@@ -1,7 +1,7 @@
 {
-  "name": "pi-acp",
-  "version": "0.0.34",
-  "description": "ACP adapter for pi coding agent",
+  "name": "@razorbackdb/pi-acp",
+  "version": "0.0.35",
+  "description": "ACP adapter for the pi coding agent, forked from svkozak/pi-acp: client MCP servers, extension slash commands, elicitation for extension input/editor prompts, structured tool results.",
   "license": "MIT",
   "author": "Sergii Kozak <svkozak@gmail.com>",
   "repository": {
@@ -20,8 +20,14 @@
     "acp",
     "agent-client-protocol",
     "pi-coding-agent",
-    "adapter"
+    "adapter",
+    "mcp",
+    "zed",
+    "jetbrains"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },
