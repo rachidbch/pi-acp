@@ -42,6 +42,8 @@ import {
 } from './translate/bash.js'
 import { promptToPiMessage, promptToSessionTitle } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
+import type { McpInjectionPlan } from './mcp-descriptor.js'
+import { prepareMcpInjection } from './mcp-descriptor.js'
 import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
@@ -196,14 +198,17 @@ export class PiAcpAgent implements ACPAgent {
 
       const cwd = opts?.cwd ?? stored.cwd
 
+      const mcpInjection = opts?.mcpServers?.length ? prepareMcpInjection(opts.mcpServers) : null
       let proc: PiRpcProcess
       try {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          ...(mcpInjection ? { mcpInjection } : {})
         })
       } catch (e: any) {
+        mcpInjection?.cleanup()
         if (e?.name === 'PiRpcSpawnError') {
           throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
         }
@@ -216,7 +221,8 @@ export class PiAcpAgent implements ACPAgent {
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
         proc,
-        fileCommands
+        fileCommands,
+        mcpInjection
       })
 
       this.lastSessionCwd = cwd
@@ -256,7 +262,9 @@ export class PiAcpAgent implements ACPAgent {
       }),
       agentCapabilities: {
         loadSession: true,
-        mcpCapabilities: { http: false, sse: false },
+        // pi connects streamable-HTTP MCP entries natively; SSE entries are skipped
+        // in mcp-descriptor.ts, so the capability claim stays honest.
+        mcpCapabilities: { http: true, sse: false },
         promptCapabilities: {
           image: true,
           audio: false,
@@ -364,7 +372,7 @@ export class PiAcpAgent implements ACPAgent {
 
     // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
     // the "New version available" notice (if any) since it's high-signal and actionable.
-    const preludeText = quietStartup
+    let preludeText = quietStartup
       ? updateNotice
         ? updateNotice + '\n'
         : ''
@@ -373,6 +381,9 @@ export class PiAcpAgent implements ACPAgent {
           fileCommands,
           updateNotice
         })
+
+    const mcpSection = buildMcpStartupSection(session.mcpInjection)
+    if (mcpSection) preludeText = preludeText ? `${preludeText}${mcpSection}` : mcpSection
 
     if (preludeText)
       session.setStartupInfo(preludeText)
@@ -1448,6 +1459,18 @@ function compareSemver(a: string, b: string): number {
     if (da < db) return -1
   }
   return 0
+}
+
+function buildMcpStartupSection(plan: McpInjectionPlan | null | undefined): string {
+  if (!plan || (!plan.serverNames.length && !plan.warnings.length)) return ''
+
+  const lines = ['## MCP', '']
+  if (plan.serverNames.length) {
+    lines.push(`- Injected ${plan.serverNames.length} client server(s): ${plan.serverNames.join(', ')}`)
+  }
+  for (const warning of plan.warnings) lines.push(`- ${warning}`)
+  lines.push('')
+  return lines.join('\n')
 }
 
 function buildUpdateNotice(): string | null {

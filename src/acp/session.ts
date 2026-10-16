@@ -18,6 +18,7 @@ import {
   type PiRpcEvent,
   type PiSessionStats
 } from '../pi-rpc/process.js'
+import { prepareMcpInjection, type McpInjectionPlan } from './mcp-descriptor.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -210,13 +211,16 @@ export class SessionManager {
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
+    const mcpInjection = params.mcpServers.length ? prepareMcpInjection(params.mcpServers) : null
     let proc: PiRpcProcess
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
-        piCommand: params.piCommand
+        piCommand: params.piCommand,
+        ...(mcpInjection ? { mcpInjection } : {})
       })
     } catch (e) {
+      mcpInjection?.cleanup()
       if (e instanceof PiRpcSpawnError) {
         throw RequestError.internalError({ code: e.code }, e.message)
       }
@@ -244,7 +248,8 @@ export class SessionManager {
       proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      autoTitle: true
+      autoTitle: true,
+      mcpInjection
     })
 
     this.sessions.set(sessionId, session)
@@ -261,7 +266,10 @@ export class SessionManager {
    * Used by session/load: create a session object bound to an existing sessionId/proc
    * if it isn't already registered.
    */
-  getOrCreate(sessionId: string, params: SessionCreateParams & { proc: PiRpcProcess }): PiAcpSession {
+  getOrCreate(
+    sessionId: string,
+    params: SessionCreateParams & { proc: PiRpcProcess; mcpInjection?: McpInjectionPlan | null }
+  ): PiAcpSession {
     const existing = this.sessions.get(sessionId)
     if (existing) return existing
 
@@ -272,7 +280,8 @@ export class SessionManager {
       proc: params.proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      autoTitle: false
+      autoTitle: false,
+      mcpInjection: params.mcpInjection
     })
 
     this.sessions.set(sessionId, session)
@@ -284,6 +293,7 @@ export class PiAcpSession {
   readonly sessionId: string
   readonly cwd: string
   readonly mcpServers: McpServer[]
+  readonly mcpInjection: McpInjectionPlan | null
 
   private startupInfo: string | null = null
   private startupInfoSent = false
@@ -332,10 +342,12 @@ export class PiAcpSession {
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
     autoTitle?: boolean
+    mcpInjection?: McpInjectionPlan | null
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
     this.mcpServers = opts.mcpServers
+    this.mcpInjection = opts.mcpInjection ?? null
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []

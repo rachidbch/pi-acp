@@ -1,7 +1,10 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import crossSpawn from 'cross-spawn'
 import { z } from 'zod'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
+import { PI_ACP_MCP_DESCRIPTOR_ENV, type McpInjectionPlan } from '../acp/mcp-descriptor.js'
+import { fileURLToPath } from 'node:url'
 
 export class PiRpcSpawnError extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
@@ -116,6 +119,152 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** Client-provided MCP servers to inject into pi (see acp/mcp-descriptor.ts). */
+  mcpInjection?: McpInjectionPlan
+}
+
+const MIN_PI_VERSION_FOR_MCP_INJECTION = '1.0.0'
+const PI_VERSION_TIMEOUT_MS = 2_000
+const PI_VERSION_MAX_OUTPUT_BYTES = 64 * 1024
+
+function compareVersion(a: string, b: string): number {
+  const pa = a.split('.').map(part => Number.parseInt(part, 10) || 0)
+  const pb = b.split('.').map(part => Number.parseInt(part, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const da = pa[i] ?? 0
+    const db = pb[i] ?? 0
+    if (da > db) return 1
+    if (da < db) return -1
+  }
+  return 0
+}
+
+function resolveBootstrapPath(name: 'mcp-bootstrap.js'): string | null {
+  // src layout (tsx dev): ../pi-extension relative to src/pi-rpc; bundle layout: ./pi-extension next to dist/index.js.
+  const candidates = [
+    fileURLToPath(new URL(`./pi-extension/${name}`, import.meta.url)),
+    fileURLToPath(new URL(`../pi-extension/${name}`, import.meta.url))
+  ]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+const liveVersionProbes = new Set<() => void>()
+process.once('exit', () => {
+  for (const cleanup of liveVersionProbes) cleanup()
+})
+
+function killVersionProbeTree(child: ChildProcess): void {
+  const killChild = () => {
+    try {
+      child.kill('SIGKILL')
+    } catch {
+      // The probe may already have exited.
+    }
+  }
+  if (!child.pid) {
+    killChild()
+    return
+  }
+  if (process.platform === 'win32') {
+    try {
+      const killer = crossSpawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+        timeout: PI_VERSION_TIMEOUT_MS,
+        killSignal: 'SIGKILL'
+      })
+      killer.on('error', killChild)
+      killer.on('exit', code => {
+        if (code !== 0) killChild()
+      })
+    } catch {
+      killChild()
+    }
+    return
+  }
+  try {
+    process.kill(-child.pid, 'SIGKILL')
+  } catch {
+    killChild()
+  }
+}
+
+function probePiVersion(cmd: string, cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = crossSpawn(cmd, ['--version'], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32'
+    })
+    const cleanup = () => killVersionProbeTree(child)
+    liveVersionProbes.add(cleanup)
+    let stdout = ''
+    let stderr = ''
+    let outputBytes = 0
+    let settled = false
+    const timer = setTimeout(() => fail(new Error('version probe timed out')), PI_VERSION_TIMEOUT_MS)
+
+    const fail = (error: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      cleanup()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      reject(error)
+    }
+    const capture = (chunk: Buffer, stream: 'stdout' | 'stderr') => {
+      if (settled) return
+      outputBytes += chunk.length
+      if (outputBytes > PI_VERSION_MAX_OUTPUT_BYTES) {
+        fail(new Error('version probe output exceeded limit'))
+        return
+      }
+      if (stream === 'stdout') stdout += chunk.toString()
+      else stderr += chunk.toString()
+    }
+    child.stdout?.on('data', (chunk: Buffer) => capture(chunk, 'stdout'))
+    child.stderr?.on('data', (chunk: Buffer) => capture(chunk, 'stderr'))
+    child.on('error', () => fail(new Error('version probe could not start')))
+    child.on('close', code => {
+      liveVersionProbes.delete(cleanup)
+      if (settled) return
+      if (code !== 0) {
+        fail(new Error('version probe exited unsuccessfully'))
+        return
+      }
+      const raw = stdout.trim() || stderr.trim()
+      const version = raw.replace(/^v/i, '').split(/[\s-]/)[0] ?? ''
+      if (!/^\d+\.\d+\.\d+$/.test(version)) {
+        fail(new Error('version probe returned an invalid version'))
+        return
+      }
+      settled = true
+      clearTimeout(timer)
+      resolve(version)
+    })
+  })
+}
+
+/** Refuse known old pi versions, but degrade gracefully when the version cannot be checked. */
+async function canInjectMcpWithPi(cmd: string, cwd: string): Promise<boolean> {
+  let version: string
+  try {
+    version = await probePiVersion(cmd, cwd)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'version probe failed'
+    console.warn(`[pi-acp] MCP injection: ${reason}; skipping client MCP servers`)
+    return false
+  }
+  if (compareVersion(version, MIN_PI_VERSION_FOR_MCP_INJECTION) < 0) {
+    throw new PiRpcSpawnError(
+      `pi v${version} does not support MCP injection: forwarding client MCP servers requires pi >= ${MIN_PI_VERSION_FOR_MCP_INJECTION}. Update pi (\`npm install -g @earendil-works/pi-coding-agent\`) or disable client MCP servers in your ACP client.`
+    )
+  }
+  return true
 }
 
 export class PiRpcProcess {
@@ -123,12 +272,14 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private readonly mcpInjection: McpInjectionPlan | null
   private startupEvents: PiRpcEvent[] | null = []
   private startupEventBytes = 0
   private terminalError: Error | undefined
 
-  private constructor(child: ChildProcessWithoutNullStreams) {
+  private constructor(child: ChildProcessWithoutNullStreams, mcpInjection: McpInjectionPlan | null) {
     this.child = child
+    this.mcpInjection = mcpInjection
 
     // Without a listener, an EPIPE on stdin (e.g. pi died mid-write) crashes the whole
     // adapter with an unhandled 'error' event. The write callback still reports the
@@ -192,10 +343,12 @@ export class PiRpcProcess {
     })
 
     child.on('exit', (code, signal) => {
+      this.mcpInjection?.cleanup()
       this.fail(new Error(`pi process exited (code=${code}, signal=${signal})`))
     })
 
     child.on('error', err => {
+      this.mcpInjection?.cleanup()
       this.fail(err)
     })
   }
@@ -204,19 +357,48 @@ export class PiRpcProcess {
     // On Windows, npm commonly creates pi.cmd / pi.bat launcher scripts.
     const cmd = getPiCommand(params.piCommand)
 
+    let mcpInjection = params.mcpInjection?.descriptorPath ? params.mcpInjection : null
+
+    // The bundled extension registers client-provided MCP servers with pi's native MCP support.
+    let mcpBootstrapPath: string | null = null
+    if (mcpInjection) {
+      try {
+        if (await canInjectMcpWithPi(cmd, params.cwd)) {
+          mcpBootstrapPath = resolveBootstrapPath('mcp-bootstrap.js')
+          if (!mcpBootstrapPath) {
+            console.warn(
+              '[pi-acp] MCP injection: bundled pi extension not found next to the pi-acp install; skipping client MCP servers'
+            )
+          }
+        }
+      } catch (error) {
+        mcpInjection.cleanup()
+        throw error
+      }
+      if (!mcpBootstrapPath) {
+        mcpInjection.cleanup()
+        mcpInjection = null
+      }
+    }
+
     // Speed/robustness for ACP:
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
     const args = ['--mode', 'rpc', '--no-themes']
+    if (mcpBootstrapPath) args.push('-e', mcpBootstrapPath)
     if (params.sessionPath) args.push('--session', params.sessionPath)
+
+    const childEnv: NodeJS.ProcessEnv = { ...process.env }
+    delete childEnv[PI_ACP_MCP_DESCRIPTOR_ENV]
+    if (mcpInjection?.descriptorPath) childEnv[PI_ACP_MCP_DESCRIPTOR_ENV] = mcpInjection.descriptorPath
 
     // Windows cmd launchers need shell escaping; direct executables use native argv.
     const start = shouldUseShellForPiCommand(cmd) ? crossSpawn : spawn
     const child = start(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env
+      env: childEnv
     }) as ChildProcessWithoutNullStreams
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
@@ -240,6 +422,7 @@ export class PiRpcProcess {
         child.once('error', onError)
       })
     } catch (e: any) {
+      mcpInjection?.cleanup()
       const code = typeof e?.code === 'string' ? e.code : undefined
       if (code === 'ENOENT') {
         throw new PiRpcSpawnError(
@@ -268,7 +451,7 @@ export class PiRpcProcess {
       }
     })
 
-    const proc = new PiRpcProcess(child)
+    const proc = new PiRpcProcess(child, mcpInjection)
 
     // Best-effort handshake.
     // Important: pi may emit a get_state response pointing at a sessionFile in a directory
@@ -319,6 +502,7 @@ export class PiRpcProcess {
   }
 
   dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
+    this.mcpInjection?.cleanup()
     this.fail(new Error('pi process disposed'))
     if (this.child.killed) return
     try {

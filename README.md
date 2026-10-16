@@ -33,6 +33,8 @@ Expect some minor breaking changes.
 - (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
+- **Client MCP servers**: MCP servers passed by the ACP client in `session/new` / `session/load` are forwarded to pi instead of being dropped. The adapter writes a session-scoped descriptor and loads a bundled pi extension (`pi --mode rpc -e …`) that registers the servers via pi's native `registerMcpServer()` (`pi >= 1.0.0`). stdio and `http` entries are forwarded; `sse` entries are skipped (not advertised). A server in your `~/.pi/agent/mcp.json` with the same name overrides an injected one (pi's native rule). Any injection failure degrades to a stderr warning, never a dead session; the session summary lists injected servers and skipped entries.
+
 ## Prerequisites
 
 Make sure pi is installed
