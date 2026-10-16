@@ -6,16 +6,16 @@
   "author": "Sergii Kozak <svkozak@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/svkozak/pi-acp.git"
+    "url": "git+https://github.com/razorbackdb/pi-acp.git"
   },
   "publishConfig": {
     "access": "public",
     "provenance": true
   },
   "bugs": {
-    "url": "https://github.com/svkozak/pi-acp/issues"
+    "url": "https://github.com/razorbackdb/pi-acp/issues"
   },
-  "homepage": "https://github.com/svkozak/pi-acp#readme",
+  "homepage": "https://github.com/razorbackdb/pi-acp#readme",
   "keywords": [
     "acp",
     "agent-client-protocol",
@@ -25,9 +25,6 @@
     "zed",
     "jetbrains"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "engines": {
     "node": ">=20"
   },
