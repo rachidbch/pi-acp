@@ -4,6 +4,29 @@ ACP ([Agent Client Protocol](https://agentclientprotocol.com/overview/introducti
 
 `pi-acp` communicates **ACP JSON-RPC 2.0 over stdio** to an ACP client (e.g. Zed editor) and spawns `pi --mode rpc`, bridging requests/events between the two.
 
+## About this fork
+
+Fork of [svkozak/pi-acp](https://github.com/svkozak/pi-acp) with features upstream doesn't have. It follows upstream `main`; upstream changes are merged in, not rebased. The test suite runs on every change, and commits are kept small so upstream can cherry-pick individual pieces. In daily use with Zed and JetBrains Air.
+
+Install with `npm install -g github:razorbackdb/pi-acp`; the `prepare` script builds the bundle. Then point your ACP client's agent-server command at the installed `pi-acp`.
+
+### What this fork adds
+
+**Client MCP servers.** MCP servers the client sends in `session/new` / `session/load` are forwarded to pi through a bundled extension that registers them with pi's native `registerMcpServer()`. stdio and http entries are supported; `sse` is skipped with a warning. Servers in your own `~/.pi/agent/mcp.json` win on name conflicts. If a server can't be injected, the session still starts and the failure goes to stderr and the startup summary. Needs `pi >= 1.0.0`.
+
+**Extension slash commands.** Commands registered by pi extensions show up in the client and run. Commands that don't start an agent loop (a toggle, a macro) also finish correctly, because turn completion follows pi's prompt disposition (`handled` / `started` / `queued`) instead of always waiting for `agent_settled`. Upstream leaves those requests pending forever.
+
+**Extension input/editor prompts.** When a pi extension asks the user a question, clients that support elicitation get a native form. Select and confirm go through `requestPermission` as before. Requests with custom schemas, or that look like password prompts, are cancelled with a note in the conversation.
+
+**Structured tool results.** Tool output is sent as ACP content blocks (text, images, embedded resources, links) instead of flattened text, on live turns and on `session/load` replay. Blocks that fail validation are replaced with a placeholder instead of dumping raw JSON; text fallbacks are cut off at 16k.
+
+### Maintenance facts
+
+- Based on `svkozak/pi-acp` `main`; upstream changes are merged, not rebased.
+- ACP v1 over stdio; spawns `pi --mode rpc`. Node.js 22+, MIT, same as upstream.
+- `pi >= 1.0.0` is only needed for MCP forwarding and prompt dispositions. Everything else works on older pi.
+- Tests run on every commit. A fixture `pi` subprocess covers framing and process lifecycle.
+
 ## Status
 
 This is an MVP-style adapter intended to be useful today and easy to iterate on. Some ACP features may be not implemented or are not supported (see [Limitations](#limitations)). Development is centered around [Zed](https://zed.dev) editor support, other clients may have varying levels of compatibility.
@@ -32,8 +55,6 @@ Expect some minor breaking changes.
 - Skills are loaded by pi directly and are available in ACP sessions
 - (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
-
-- **Client MCP servers**: MCP servers passed by the ACP client in `session/new` / `session/load` are forwarded to pi instead of being dropped. The adapter writes a session-scoped descriptor and loads a bundled pi extension (`pi --mode rpc -e …`) that registers the servers via pi's native `registerMcpServer()` (`pi >= 1.0.0`). stdio and `http` entries are forwarded; `sse` entries are skipped (not advertised). A server in your `~/.pi/agent/mcp.json` with the same name overrides an injected one (pi's native rule). Any injection failure degrades to a stderr warning, never a dead session; the session summary lists injected servers and skipped entries.
 
 ## Prerequisites
 
