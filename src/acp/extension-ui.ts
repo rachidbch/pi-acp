@@ -1,17 +1,17 @@
 import type {
-  AgentSideConnection,
   ClientCapabilities,
   ElicitationPropertySchema,
   PermissionOption,
   SessionUpdate
 } from '@agentclientprotocol/sdk'
 import { CreateElicitationResponse } from '@agentclientprotocol/sdk'
+import type { AcpClient } from './connection.js'
 
 export type ExtensionUiResponse = { id: string } & ({ value: string } | { confirmed: boolean } | { cancelled: true })
 
 export interface ExtensionUiHost {
   sessionId: string
-  conn: AgentSideConnection
+  conn: AcpClient
   clientCapabilities?: ClientCapabilities
   sendResponse(response: ExtensionUiResponse): Promise<void>
   emit(update: SessionUpdate): void | Promise<void>
@@ -35,11 +35,21 @@ export async function handleExtensionUiRequest(event: Record<string, unknown>, h
   if (method === 'notify') {
     const level = text(event, 'notifyType')
     try {
-      await host.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: text(event, 'message') ?? 'Pi notification' },
-        _meta: { piAcp: { notify: { level: level === 'warning' || level === 'error' ? level : 'info' } } }
-      })
+      const message = text(event, 'message') || 'Pi notification'
+      const severity = level === 'warning' || level === 'error' ? level : 'info'
+      await host.emit(
+        host.clientCapabilities?.session?.notices != null
+          ? {
+              sessionUpdate: 'notice',
+              severity,
+              title: message
+            }
+          : {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: message },
+              _meta: { piAcp: { notify: { level: severity } } }
+            }
+      )
     } catch {
       // Notifications never require a response, including on delivery failure.
     }

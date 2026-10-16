@@ -2,7 +2,6 @@ import {
   PROTOCOL_VERSION,
   RequestError,
   type Agent as ACPAgent,
-  type AgentSideConnection,
   type AuthenticateRequest,
   type CancelNotification,
   type ClientCapabilities,
@@ -14,6 +13,10 @@ import {
   type ListSessionsResponse,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type ResumeSessionRequest,
+  type ResumeSessionResponse,
+  type CloseSessionRequest,
+  type CloseSessionResponse,
   type NewSessionRequest,
   type PromptRequest,
   type PromptResponse,
@@ -27,12 +30,13 @@ import {
   type DeleteSessionRequest,
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
+import type { AcpClient } from './connection.js'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, type PiAcpSession } from './session.js'
+import { SessionManager, toToolKind, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions.js'
-import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
+import { normalizePiAssistantText, normalizePiMessageText, normalizePiThoughtText } from './translate/pi-messages.js'
 import {
   bashCommand,
   bashExitCode,
@@ -55,6 +59,7 @@ import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSy
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { isDeepStrictEqual } from 'node:util'
 
 type AdvertisedModel = {
   modelId: string
@@ -126,7 +131,7 @@ import { fileURLToPath } from 'node:url'
 const pkg = readNearestPackageJson(import.meta.url)
 
 export class PiAcpAgent implements ACPAgent {
-  private readonly conn: AgentSideConnection
+  private readonly conn: AcpClient
   private readonly sessions = new SessionManager()
   private readonly store = new SessionStore()
   private clientCapabilities: ClientCapabilities = {}
@@ -139,7 +144,7 @@ export class PiAcpAgent implements ACPAgent {
   // Remember recent session cwd and use it as the default filter.
   private lastSessionCwd: string | null = null
 
-  constructor(conn: AgentSideConnection, _config?: unknown) {
+  constructor(conn: AcpClient, _config?: unknown) {
     this.conn = conn
     void _config
   }
@@ -230,13 +235,18 @@ export class PiAcpAgent implements ACPAgent {
         clientCapabilities: this.clientCapabilities
       })
 
-      this.lastSessionCwd = cwd
-      this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
+      try {
+        this.lastSessionCwd = cwd
+        this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
 
-      const title = readPiSessionTitle(stored.sessionFile)
-      if (title) await session.publishTitle(title, null)
+        const title = readPiSessionTitle(stored.sessionFile)
+        if (title) await session.publishTitle(title, null)
 
-      return session
+        return session
+      } catch (err) {
+        this.sessions.close(sessionId)
+        throw err
+      }
     })()
 
     this.restoringSessions.set(sessionId, restorePromise)
@@ -264,7 +274,8 @@ export class PiAcpAgent implements ACPAgent {
       // Zed currently uses ClientCapabilities._meta["terminal-auth"] to decide whether to show
       // the "Authenticate" banner/button. If not supported, we still return the method for the registry.
       authMethods: getAuthMethods({
-        supportsTerminalAuthMeta: (params as any)?.clientCapabilities?._meta?.['terminal-auth'] === true
+        supportsTerminalAuth: this.clientCapabilities.auth?.terminal === true,
+        supportsTerminalAuthMeta: this.clientCapabilities._meta?.['terminal-auth'] === true
       }),
       agentCapabilities: {
         loadSession: true,
@@ -280,7 +291,9 @@ export class PiAcpAgent implements ACPAgent {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
           list: {},
-          delete: {}
+          delete: {},
+          resume: {},
+          close: {}
         },
         _meta: {
           // UNSTABLE claude-agent-acp contract. Auth discovery can read either this
@@ -360,7 +373,7 @@ export class PiAcpAgent implements ACPAgent {
         })
     ])
 
-    const availableModelsAuthErr = maybeAuthRequiredError(availableModelsErr)
+    const availableModelsAuthErr = maybeAuthRequiredError(availableModelsErr, this.clientCapabilities)
 
     if (availableModelsAuthErr) {
       this.cleanupFailedNewSession(session.sessionId, state)
@@ -378,15 +391,25 @@ export class PiAcpAgent implements ACPAgent {
     if (rawModelsCount === 0) {
       this.cleanupFailedNewSession(session.sessionId, state)
       throw RequestError.authRequired(
-        { authMethods: getAuthMethods() },
+        {
+          authMethods: getAuthMethods({
+            supportsTerminalAuth: this.clientCapabilities.auth?.terminal === true,
+            supportsTerminalAuthMeta: this.clientCapabilities._meta?.['terminal-auth'] === true
+          })
+        },
         'Configure an API key or log in with an OAuth provider.'
       )
     }
 
-    if (stateErr && maybeAuthRequiredError(stateErr)) {
+    if (stateErr && maybeAuthRequiredError(stateErr, this.clientCapabilities)) {
       this.cleanupFailedNewSession(session.sessionId, state)
       throw RequestError.authRequired(
-        { authMethods: getAuthMethods() },
+        {
+          authMethods: getAuthMethods({
+            supportsTerminalAuth: this.clientCapabilities.auth?.terminal === true,
+            supportsTerminalAuthMeta: this.clientCapabilities._meta?.['terminal-auth'] === true
+          })
+        },
         'Configure an API key or log in with an OAuth provider.'
       )
     }
@@ -397,7 +420,10 @@ export class PiAcpAgent implements ACPAgent {
       configuration = await getSessionConfiguration(session.proc, { state, availableModels })
     } catch (err) {
       this.cleanupFailedNewSession(session.sessionId, state)
-      throw maybeAuthRequiredError(err) ?? RequestError.internalError({}, String((err as Error)?.message ?? err))
+      throw (
+        maybeAuthRequiredError(err, this.clientCapabilities) ??
+        RequestError.internalError({}, String((err as Error)?.message ?? err))
+      )
     }
     const { configOptions, models, modes } = configuration
 
@@ -501,8 +527,22 @@ export class PiAcpAgent implements ACPAgent {
     return
   }
 
-  async prompt(params: PromptRequest): Promise<PromptResponse> {
+  async prompt(params: PromptRequest, signal?: AbortSignal): Promise<PromptResponse> {
+    if (signal?.aborted) return { stopReason: 'cancelled' }
+    try {
+      const response = await this.runPrompt(params, signal)
+      return signal?.aborted ? { stopReason: 'cancelled' } : response
+    } catch (error) {
+      if (signal?.aborted) {
+        return { stopReason: 'cancelled' }
+      }
+      throw error
+    }
+  }
+
+  private async runPrompt(params: PromptRequest, signal?: AbortSignal): Promise<PromptResponse> {
     const session = await this.restoreSession(params.sessionId)
+    if (signal?.aborted) return { stopReason: 'cancelled' }
 
     const { message, images } = promptToPiMessage(params.prompt)
 
@@ -517,7 +557,10 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'compact') {
         const customInstructions = args.join(' ').trim() || undefined
-        const res = await session.proc.compact(customInstructions)
+        const compact = await session.compact(customInstructions, signal)
+        if (compact.cancelled) return { stopReason: 'cancelled' }
+        const res = compact.result
+        if (this.clientCapabilities.session?.compaction != null) return { stopReason: 'end_turn' }
 
         const r: any = res && typeof res === 'object' ? (res as any) : null
         const tokensBefore = typeof r?.tokensBefore === 'number' ? r.tokensBefore : null
@@ -939,12 +982,13 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const result = await session.prompt(message, images, promptToSessionTitle(params.prompt) ?? undefined)
+    const result = await session.prompt(message, images, promptToSessionTitle(params.prompt) ?? undefined, signal)
 
-    // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
-    // unless we know this was a cancellation.
-    const stopReason: StopReason =
-      result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
+    // ACP v1 reports failures as request errors, not successful end_turn responses.
+    if (result === 'error' && !session.wasCancelRequested()) {
+      throw RequestError.internalError({}, 'Pi prompt failed')
+    }
+    const stopReason: StopReason = result === 'error' ? 'cancelled' : result
 
     return { stopReason }
   }
@@ -1032,17 +1076,20 @@ export class PiAcpAgent implements ACPAgent {
     // Replay full conversation history.
     const data = (await proc.getMessages()) as any
     const messages = Array.isArray(data?.messages) ? data.messages : []
+    session.seedMessageIds([])
 
     for (const m of messages) {
       const role = String(m?.role ?? '')
 
       if (role === 'user') {
+        const messageId = session.messageIdForReplay(m)
         const text = normalizePiMessageText(m?.content)
         if (text) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'user_message_chunk',
+              messageId,
               content: { type: 'text', text }
             }
           })
@@ -1050,12 +1097,25 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       if (role === 'assistant') {
+        const messageId = session.messageIdForReplay(m)
+        const thinking = normalizePiThoughtText(m?.content)
+        if (thinking) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'agent_thought_chunk',
+              messageId: `${messageId}:thought`,
+              content: { type: 'text', text: thinking }
+            }
+          })
+        }
         const text = normalizePiAssistantText(m?.content)
         if (text) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'agent_message_chunk',
+              messageId,
               content: { type: 'text', text }
             }
           })
@@ -1076,8 +1136,9 @@ export class PiAcpAgent implements ACPAgent {
               sessionUpdate: 'tool_call',
               toolCallId,
               title: bashCommand(m) ?? toolName,
+              name: toolName,
               kind: 'execute',
-              status: 'completed',
+              status: isError ? 'failed' : 'completed',
               content: bashTerminalContent(toolCallId),
               _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
             }
@@ -1106,8 +1167,9 @@ export class PiAcpAgent implements ACPAgent {
             sessionUpdate: 'tool_call',
             toolCallId,
             title: toolName,
-            kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
-            status: 'completed',
+            name: toolName,
+            kind: toToolKind(toolName),
+            status: isError ? 'failed' : 'completed',
             rawInput: null,
             rawOutput: m
           }
@@ -1175,7 +1237,45 @@ export class PiAcpAgent implements ACPAgent {
     return response
   }
 
+  async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+    if (!isAbsolute(params.cwd)) {
+      throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
+    }
+
+    const existing = this.sessions.maybeGet(params.sessionId)
+    const session = await this.restoreSession(params.sessionId, {
+      cwd: params.cwd,
+      mcpServers: params.mcpServers ?? []
+    })
+    // A live process cannot change its workspace or injected MCP descriptors.
+    if (session.cwd !== params.cwd || !isDeepStrictEqual(session.mcpServers, params.mcpServers ?? [])) {
+      throw RequestError.invalidParams('Close the session before resuming with a different cwd or MCP servers')
+    }
+
+    try {
+      const { configOptions, modes } = await getSessionConfiguration(session.proc)
+      if (!existing) {
+        const data = await session.proc.getMessages()
+        const messages = data && typeof data === 'object' && 'messages' in data ? data.messages : undefined
+        session.seedMessageIds(Array.isArray(messages) ? messages : [])
+      }
+      this.lastSessionCwd = session.cwd
+      return { configOptions, modes }
+    } catch (err) {
+      if (!existing) this.sessions.close(session.sessionId)
+      throw err
+    }
+  }
+
+  async closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {
+    // A restore already in progress must finish before its process can be reclaimed.
+    await this.restoringSessions.get(params.sessionId)?.catch(() => {})
+    this.sessions.close(params.sessionId)
+    return {}
+  }
+
   async deleteSession(params: DeleteSessionRequest): Promise<DeleteSessionResponse> {
+    await this.closeSession(params)
     const stored = this.store.get(params.sessionId)
     const piSession = findPiSession(params.sessionId)
 
@@ -1190,9 +1290,11 @@ export class PiAcpAgent implements ACPAgent {
 
     if (sessionFile) {
       try {
-        if (existsSync(sessionFile)) unlinkSync(sessionFile)
-      } catch {
-        // best-effort cleanup
+        unlinkSync(sessionFile)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw RequestError.internalError({}, `Failed to delete session: ${String(err)}`)
+        }
       }
     }
 
@@ -1423,7 +1525,7 @@ async function getModelState(
 }
 
 async function emitConfigOptionsUpdate(
-  conn: AgentSideConnection,
+  conn: AcpClient,
   sessionId: string,
   proc: PiRpcProcess
 ): Promise<SessionConfigOption[]> {

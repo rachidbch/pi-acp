@@ -21,6 +21,7 @@ test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
 
   proc.emit({
     type: 'message_update',
+    message: { role: 'assistant', timestamp: 42 },
     assistantMessageEvent: { type: 'text_delta', delta: 'hi' }
   })
 
@@ -30,6 +31,7 @@ test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   assert.equal(conn.updates[0]!.sessionId, 's1')
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
+    messageId: 'pi-acp:assistant:42:1',
     content: { type: 'text', text: 'hi' }
   })
 })
@@ -49,6 +51,7 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
 
   proc.emit({
     type: 'message_update',
+    message: { role: 'assistant', timestamp: 42 },
     assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking...' }
   })
 
@@ -58,6 +61,7 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
   assert.equal(conn.updates[0]!.sessionId, 's1')
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_thought_chunk',
+    messageId: 'pi-acp:assistant:42:1:thought',
     content: { type: 'text', text: 'thinking...' }
   })
 })
@@ -464,7 +468,10 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
   await new Promise(r => setTimeout(r, 0))
 
   assert.deepEqual(
-    conn.updates.map(u => u.update),
+    conn.updates.map(u => {
+      const { messageId: _messageId, ...update } = u.update as typeof u.update & { messageId?: string }
+      return update
+    }),
     [
       { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'before ' } },
       {

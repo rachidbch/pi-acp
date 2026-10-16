@@ -40,6 +40,7 @@ function fixture() {
     proc,
     setStartupInfo() {},
     sendStartupInfoIfPending() {},
+    seedMessageIds() {},
     async publishContextUsage() {}
   }
   const agent = new PiAcpAgent(asAgentConn(conn))

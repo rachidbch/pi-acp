@@ -1,4 +1,4 @@
-import { RequestError } from '@agentclientprotocol/sdk'
+import { RequestError, type ClientCapabilities } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 
 /**
@@ -6,7 +6,7 @@ import { getAuthMethods } from './auth.js'
  *
  * We can't do a full provider-specific check here, so we look for common substrings.
  */
-export function maybeAuthRequiredError(err: unknown): RequestError | null {
+export function maybeAuthRequiredError(err: unknown, capabilities?: ClientCapabilities): RequestError | null {
   const msg = String((err as any)?.message ?? err ?? '')
   const s = msg.toLowerCase()
 
@@ -30,7 +30,10 @@ export function maybeAuthRequiredError(err: unknown): RequestError | null {
   // Include terminal auth method options in error data.
   return RequestError.authRequired(
     {
-      authMethods: getAuthMethods()
+      authMethods: getAuthMethods({
+        supportsTerminalAuth: capabilities?.auth?.terminal === true,
+        supportsTerminalAuthMeta: capabilities?._meta?.['terminal-auth'] === true
+      })
     },
     'Configure an API key or log in with an OAuth provider.'
   )

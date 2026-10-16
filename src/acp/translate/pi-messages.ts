@@ -15,3 +15,13 @@ export function normalizePiAssistantText(content: unknown): string {
     .filter(Boolean)
     .join('')
 }
+
+export function normalizePiThoughtText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  return content
+    .map(block => {
+      if (typeof block !== 'object' || block === null) return ''
+      return block.type === 'thinking' && typeof block.thinking === 'string' ? block.thinking : ''
+    })
+    .join('')
+}

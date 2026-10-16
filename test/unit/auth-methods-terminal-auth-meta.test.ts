@@ -15,8 +15,15 @@ test('getAuthMethods: includes Zed terminal-auth metadata when enabled', () => {
   assert.equal(m._meta['terminal-auth'].label, 'Launch pi')
 })
 
-test('getAuthMethods: omits Zed terminal-auth metadata when disabled', () => {
-  const methods = getAuthMethods({ supportsTerminalAuthMeta: false })
+test('getAuthMethods: stable terminal capability works without legacy metadata', () => {
+  const methods = getAuthMethods({ supportsTerminalAuth: true, supportsTerminalAuthMeta: false })
   const m: any = methods[0]
+  assert.equal(m.type, 'terminal')
+  assert.deepEqual(m.args, ['--terminal-login'])
   assert.ok(!m._meta || !m._meta['terminal-auth'])
+})
+
+test('getAuthMethods: unnegotiated terminal authentication is not advertised', () => {
+  assert.deepEqual(getAuthMethods(), [])
+  assert.deepEqual(getAuthMethods({ supportsTerminalAuth: false, supportsTerminalAuthMeta: false }), [])
 })

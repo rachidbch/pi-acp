@@ -10,19 +10,22 @@ export const PI_SETUP_METHOD_ID = 'pi_terminal_login'
  *  - `_meta["terminal-auth"]`: used by Zed to render the "Authenticate" banner + button.
  *  - `type/args/env`: registry-required shape.
  */
-export function getAuthMethods(opts?: { supportsTerminalAuthMeta?: boolean }): AuthMethod[] {
-  const supportsTerminalAuthMeta = opts?.supportsTerminalAuthMeta ?? true
+export function getAuthMethods(opts?: {
+  supportsTerminalAuth?: boolean
+  supportsTerminalAuthMeta?: boolean
+}): AuthMethod[] {
+  const supportsTerminalAuth = opts?.supportsTerminalAuth === true
+  const supportsTerminalAuthMeta = opts?.supportsTerminalAuthMeta === true
+  if (!supportsTerminalAuth && !supportsTerminalAuthMeta) return []
 
-  const method: any = {
+  const base = {
     id: PI_SETUP_METHOD_ID,
     name: 'Launch pi in the terminal',
-    description: 'Start pi in an interactive terminal to configure API keys or login',
-
-    // Registry-required fields
-    type: 'terminal',
-    args: ['--terminal-login'],
-    env: {}
+    description: 'Start pi in an interactive terminal to configure API keys or login'
   }
+  const method: AuthMethod = supportsTerminalAuth
+    ? { ...base, type: 'terminal', args: ['--terminal-login'], env: {} }
+    : base
 
   if (supportsTerminalAuthMeta) {
     // Best-effort launch spec for Zed's terminal-auth banner.
@@ -38,7 +41,7 @@ export function getAuthMethods(opts?: { supportsTerminalAuthMeta?: boolean }): A
     }
   }
 
-  return [method as AuthMethod]
+  return [method]
 }
 
 function terminalAuthLaunchSpec(): { command: string; args: string[] } {
