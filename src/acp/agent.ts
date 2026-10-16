@@ -5,6 +5,8 @@ import {
   type AuthenticateRequest,
   type CancelNotification,
   type ClientCapabilities,
+  type ListProvidersRequest,
+  type ListProvidersResponse,
   type InitializeRequest,
   type InitializeResponse,
   type ListSessionsRequest,
@@ -251,7 +253,7 @@ export class PiAcpAgent implements ACPAgent {
     const supportedVersion = 1
     const requested = params.protocolVersion
 
-    return {
+    const response: InitializeResponse = {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
       agentInfo: {
         name: pkg.name ?? 'pi-acp',
@@ -278,9 +280,36 @@ export class PiAcpAgent implements ACPAgent {
           // Enables a native session picker in clients that support it.
           list: {},
           delete: {}
+        },
+        _meta: {
+          // UNSTABLE claude-agent-acp contract. Auth discovery can read either this
+          // marker or the _auth/status_update push below; both need a complete
+          // kind/label identity, since an empty marker can stall model discovery.
+          authStatus: {
+            kind: 'api_key',
+            label: 'pi',
+            detail: 'provider credentials managed by pi'
+          }
         }
       }
     }
+
+    // Some clients await this optional auth-status push before model discovery.
+    // Send it after initialization; clients without the extension can ignore it.
+    setTimeout(() => {
+      // Optional call: test fakes may not implement extension notifications.
+      void this.conn
+        .extNotification?.('_auth/status_update', {
+          authStatus: {
+            kind: 'api_key',
+            label: 'pi',
+            detail: 'provider credentials managed by pi'
+          }
+        })
+        ?.catch(() => {})
+    }, 0)
+
+    return response
   }
 
   async newSession(params: NewSessionRequest) {
@@ -454,6 +483,14 @@ export class PiAcpAgent implements ACPAgent {
     }, 0)
 
     return response
+  }
+
+  /**
+   * Some clients query providers during initialization before creating a session.
+   * Pi owns provider configuration, so return an empty catalog rather than a missing-method error.
+   */
+  async unstable_listProviders(_params: ListProvidersRequest): Promise<ListProvidersResponse> {
+    return { providers: [] }
   }
 
   async authenticate(_params: AuthenticateRequest) {

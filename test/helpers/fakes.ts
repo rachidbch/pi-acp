@@ -6,6 +6,7 @@ type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 export class FakeAgentSideConnection {
   readonly updates: SessionUpdateMsg[] = []
   readonly permissionRequests: unknown[] = []
+  readonly extNotifications: Array<{ method: string; params: unknown }> = []
   private readonly abortController = new AbortController()
   get signal(): AbortSignal {
     return this.abortController.signal
@@ -16,6 +17,11 @@ export class FakeAgentSideConnection {
 
   async sessionUpdate(msg: SessionUpdateMsg): Promise<void> {
     this.updates.push(msg)
+  }
+
+  extNotification(method: string, params?: unknown): Promise<void> {
+    this.extNotifications.push({ method, params })
+    return Promise.resolve()
   }
 
   async requestPermission(
