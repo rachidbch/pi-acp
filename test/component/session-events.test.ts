@@ -121,7 +121,7 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
     terminal_output: { terminal_id: 't1', data: 'done' },
     terminal_exit: { terminal_id: 't1', exit_code: 0, signal: null }
   })
-  assert.equal((conn.updates[2]!.update as any).rawOutput, undefined)
+  assert.deepEqual((conn.updates[2]!.update as any).rawOutput, { content: [{ type: 'text', text: 'done' }] })
 })
 
 test('PiAcpSession: emits tool locations from pi path args', async () => {

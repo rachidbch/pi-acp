@@ -612,6 +612,7 @@ export class PiAcpSession {
       sessionUpdate: 'tool_call_update',
       toolCallId: params.toolCallId,
       status: params.status,
+      ...(params.status !== 'in_progress' ? { rawOutput: params.result } : {}),
       _meta: {
         ...(delta ? bashTerminalOutputMeta(params.toolCallId, delta) : {}),
         ...(params.status === 'completed' || params.status === 'failed'
