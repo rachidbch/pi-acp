@@ -1,5 +1,4 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import * as readline from 'node:readline'
 import crossSpawn from 'cross-spawn'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
@@ -120,8 +119,10 @@ export class PiRpcProcess {
     // error to the pending request.
     child.stdin.on('error', () => {})
 
-    const rl = readline.createInterface({ input: child.stdout })
-    rl.on('line', line => {
+    // RPC records are LF-delimited; U+2028/U+2029 inside JSON strings are content,
+    // but node's readline splits on those too, silently corrupting otherwise valid
+    // NDJSON. Split on \n explicitly (with utf8 decoding across chunk boundaries).
+    const onLine = (line: string) => {
       if (!line.trim()) return
       let msg: any
       try {
@@ -143,6 +144,18 @@ export class PiRpcProcess {
       }
 
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
+    }
+
+    let stdoutRest = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      stdoutRest += chunk
+      let newline: number
+      while ((newline = stdoutRest.indexOf('\n')) !== -1) {
+        const line = stdoutRest.slice(0, newline).replace(/\r$/, '')
+        stdoutRest = stdoutRest.slice(newline + 1)
+        onLine(line)
+      }
     })
 
     child.on('exit', (code, signal) => {

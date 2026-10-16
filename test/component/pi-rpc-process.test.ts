@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
-import { PiRpcProcess } from '../../src/pi-rpc/process.js'
+import { PiRpcProcess, type PiRpcEvent } from '../../src/pi-rpc/process.js'
 
 const cwd = process.cwd()
 const fixture = fileURLToPath(new URL('../fixtures/fake-pi.mjs', import.meta.url))
@@ -50,6 +50,25 @@ test('PiRpcProcess requests fail fast after the pi child exits', { skip: process
   }
   assert.match(String(error), /pi process exited/)
 })
+
+test('PiRpcProcess frames RPC records on LF only, keeping U+2028/U+2029 content intact',
+  { skip: process.platform === 'win32' },
+  async t => {
+    const proc = await PiRpcProcess.spawn({ cwd, piCommand: fixture })
+    t.after(() => proc.dispose())
+
+    const events: PiRpcEvent[] = []
+    proc.onEvent(ev => events.push(ev))
+
+    // The fixture emits an event whose JSON text contains a raw U+2028; with
+    // node's readline this splits into two unparseable fragments.
+    await proc.getCommands()
+
+    assert.equal(events.length, 1)
+    const delta = (events[0] as { assistantMessageEvent?: { delta?: string } }).assistantMessageEvent?.delta
+    assert.equal(delta, 'before\u2028after')
+  }
+)
 
 test('PiRpcProcess request timeouts are tagged with ETIMEDOUT', { skip: process.platform === 'win32' }, async t => {
   const proc = await PiRpcProcess.spawn({ cwd, piCommand: fixture })
