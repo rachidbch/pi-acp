@@ -717,7 +717,12 @@ export class PiRpcProcess {
       try {
         this.child.stdin.write(line, error => {
           if (error) {
-            reject(error)
+            // A failed stdin write (e.g. EPIPE) means pi is already gone. Fail the
+            // process so every caller sees the same terminal error instead of a
+            // raw write error racing the child's exit event.
+            const code = (error as NodeJS.ErrnoException).code
+            this.fail(new Error(`pi process exited (stdin write failed: ${code ?? error.message})`))
+            reject(this.terminalError ?? error)
             return
           }
 

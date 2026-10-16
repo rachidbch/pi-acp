@@ -10,6 +10,14 @@ const agentUrl = new URL('../../src/acp/agent.ts', import.meta.url).href
 const indexUrl = new URL('../../src/index.ts', import.meta.url).href
 const descriptorUrl = new URL('../../src/acp/mcp-descriptor.ts', import.meta.url).href
 
+// Ambient PI_ACP_* variables (e.g. leaked from an IDE-spawned shell) change adapter
+// behavior and its stderr; strip them so the shutdown assertions stay hermetic.
+function sanitizedEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  for (const key of Object.keys(env)) if (key.startsWith('PI_ACP_')) delete env[key]
+  return env
+}
+
 for (const trigger of ['stdin', 'stdout', 'SIGTERM', 'SIGINT'] as const) {
   test(
     `adapter disposes its agent on ${trigger}`,
@@ -30,6 +38,7 @@ for (const trigger of ['stdin', 'stdout', 'SIGTERM', 'SIGINT'] as const) {
     `
       const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], {
         cwd,
+        env: sanitizedEnv(),
         stdio: ['pipe', 'pipe', 'pipe', 'ipc']
       })
       t.after(() => {
