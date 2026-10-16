@@ -1329,10 +1329,14 @@ async function getModelState(
       const id = String(m?.id ?? '').trim()
       if (!provider || !id) return null
 
-      const name = String(m?.name ?? id)
+      const rawName = String(m?.name ?? '').trim()
+      const modelId = `${provider}/${id}`
+      // Some clients reject a model option whose display name equals its id;
+      // derive a distinguishable name when pi's name is missing or identical.
+      const name = rawName && rawName !== id ? `${provider}/${rawName}` : `${provider} ${id}`
       return {
-        modelId: `${provider}/${id}`,
-        name: `${provider}/${name}`,
+        modelId,
+        name,
         description: null
       } satisfies AdvertisedModel
     })
