@@ -514,7 +514,7 @@ export class PiAcpAgent implements ACPAgent {
 
       // Policy: within a single ACP connection, sweep idle sessions so unused pi
       // subprocesses do not leak. Sessions with an in-flight turn are skipped:
-      // hosts like Air share one connection across several threads, and closing
+      // some hosts share one connection across several threads, and closing
       // a busy session cancels that thread's conversation mid-turn.
       //
       // (Tests sometimes stub out `this.sessions`, so guard the call.)

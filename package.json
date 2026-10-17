@@ -1,6 +1,6 @@
 {
   "name": "@razorbackdb/pi-acp",
-  "version": "0.0.35",
+  "version": "0.0.36",
   "description": "ACP adapter for the pi coding agent, forked from svkozak/pi-acp: client MCP servers, extension slash commands, elicitation for extension input/editor prompts, structured tool results.",
   "license": "MIT",
   "author": "Sergii Kozak <svkozak@gmail.com>",

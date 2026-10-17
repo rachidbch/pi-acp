@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Reproduces the Air "conversation cut off" cascade: creating a second session
+// Reproduces the shared-connection "conversation cut off" cascade: creating a second session
 // over the same ACP connection must not cancel a turn that is still streaming
 // in the first session.
 //
-// Observed against JetBrains Air (one ACP connection shared by all threads of
+// Observed against hosts that share one ACP connection across threads of
 // an agent+cwd): session/new for a new thread swept the old thread's pi
 // subprocess (stopReason "cancelled", stream cut mid-sentence).
 //
@@ -171,7 +171,7 @@ try {
   if (state.chunksA.length === 0) throw new Error('session A never started streaming')
   log('session A streaming, chunks:', state.chunksA.length)
 
-  // Mid-stream: open a second session over the same connection (Air "New Session").
+  // Mid-stream: open a second session over the same connection (client "New Session").
   await new Promise(r => setTimeout(r, 300))
   const b = await request('session/new', { cwd: dir, mcpServers: [] })
   state.sessionB = b.sessionId
