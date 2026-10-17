@@ -61,6 +61,8 @@ type PendingTurn = {
   acknowledged: boolean
   /** Whether `agent_settled` has been emitted for this turn. */
   settled: boolean
+  /** Context-token snapshot taken when the turn started (null on stats failure). */
+  preStats: Promise<PiSessionStats | null>
   completing?: boolean
 }
 
@@ -70,6 +72,8 @@ type QueuedTurn = {
   title?: string
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
+  /** Filled with derived per-turn usage (when computable) before the turn resolves. */
+  usageOut?: { usage?: TurnUsage }
 }
 
 /**
@@ -85,6 +89,33 @@ function toUsageUpdate(stats: PiSessionStats | null | undefined): SessionUpdate 
   if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return null
 
   return { sessionUpdate: 'usage_update', used, size }
+}
+
+export type TurnUsage = { totalTokens: number; inputTokens: number; outputTokens: number }
+
+function contextTokens(stats: PiSessionStats | null | undefined): number | null {
+  const tokens = stats?.contextUsage?.tokens
+  return typeof tokens === 'number' && Number.isSafeInteger(tokens) && tokens >= 0 ? tokens : null
+}
+
+/**
+ * Derive ACP `PromptResponse.usage` from pi context snapshots. pi only exposes
+ * cumulative context tokens (`get_session_stats`), so this is context-growth
+ * attribution, not billed API tokens: inputTokens = context at turn start
+ * (prior turns included, no cache split), outputTokens = post - pre (assistant
+ * output plus tool results), totalTokens = context after the turn. Real cost
+ * flows separately via `usage_update.cost`. Returns null when either snapshot
+ * is missing or the context shrank (e.g. compaction) - omit rather than
+ * mislead.
+ */
+export function deriveTurnUsage(
+  pre: PiSessionStats | null | undefined,
+  post: PiSessionStats | null | undefined
+): TurnUsage | null {
+  const before = contextTokens(pre)
+  const after = contextTokens(post)
+  if (before === null || after === null || after < before) return null
+  return { totalTokens: after, inputTokens: before, outputTokens: after - before }
 }
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
@@ -507,7 +538,13 @@ export class PiAcpSession {
     })
   }
 
-  async prompt(message: string, images: unknown[] = [], title?: string, signal?: AbortSignal): Promise<StopReason> {
+  async prompt(
+    message: string,
+    images: unknown[] = [],
+    title?: string,
+    signal?: AbortSignal,
+    usageOut?: { usage?: TurnUsage }
+  ): Promise<StopReason> {
     if (this.disposed || signal?.aborted) return 'cancelled'
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
@@ -531,7 +568,7 @@ export class PiAcpSession {
       }
     }
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      queued = { message: expandedMessage, images, title, resolve, reject }
+      queued = { message: expandedMessage, images, title, resolve, reject, usageOut }
       signal?.addEventListener('abort', abort, { once: true })
 
       // If a turn is already running, enqueue.
@@ -670,11 +707,13 @@ export class PiAcpSession {
    * Queued updates are flushed even when the stats query fails or times out, so callers
    * can await this before resolving `session/prompt`.
    */
-  async publishContextUsage(): Promise<void> {
+  async publishContextUsage(): Promise<PiSessionStats | null> {
+    let stats: PiSessionStats | null = null
     try {
       // Older/stubbed pi processes may not expose the stats RPC at all.
       if (typeof this.proc.getSessionStats === 'function') {
-        const update = toUsageUpdate(await this.proc.getSessionStats(SESSION_STATS_TIMEOUT_MS))
+        stats = await this.proc.getSessionStats(SESSION_STATS_TIMEOUT_MS)
+        const update = toUsageUpdate(stats)
         if (update) this.emit(update)
       }
     } catch {
@@ -682,6 +721,7 @@ export class PiAcpSession {
     }
 
     await this.flushEmits()
+    return stats
   }
 
   private async settleTurn(): Promise<void> {
@@ -702,7 +742,7 @@ export class PiAcpSession {
     this.finishOutstandingTools(this.cancelRequested ? 'Cancelled.' : 'Turn ended before the tool completed.')
     // Ensure all updates derived from pi events (plus the final usage update) are
     // delivered before we resolve the ACP `session/prompt` request.
-    await this.publishContextUsage()
+    const postStats = await this.publishContextUsage()
     if (this.pendingTurn !== turn) return
     this.pendingTurn = null
     if (this.cancelRequested || turn.outcome === 'cancelled') turn.resolve('cancelled')
@@ -712,7 +752,20 @@ export class PiAcpSession {
         maybeAuthRequiredError(error, this.clientCapabilities) ??
           RequestError.internalError({ reason: 'pi_error' }, error.message)
       )
-    } else turn.resolve(turn.outcome ?? 'end_turn')
+    } else {
+      // The turn-start snapshot runs concurrently with the turn; race it with the same
+      // auxiliary budget so a hanging stats call can never block prompt resolution.
+      const preStats = await Promise.race([
+        turn.preStats,
+        new Promise<null>(resolve => {
+          const timer = setTimeout(resolve, SESSION_STATS_TIMEOUT_MS, null)
+          timer.unref?.()
+        })
+      ])
+      const usage = deriveTurnUsage(preStats, postStats)
+      if (usage && turn.queued.usageOut) turn.queued.usageOut.usage = usage
+      turn.resolve(turn.outcome ?? 'end_turn')
+    }
     this.startNextTurn()
   }
 
@@ -809,9 +862,15 @@ export class PiAcpSession {
       settled: false,
       title: t.title,
       resolve: t.resolve,
-      reject: t.reject
+      reject: t.reject,
+      preStats: Promise.resolve(null)
     }
     this.pendingTurn = turn
+    // Snapshot context tokens at turn start so per-turn usage can be derived at completion.
+    turn.preStats =
+      typeof this.proc.getSessionStats === 'function'
+        ? this.proc.getSessionStats(SESSION_STATS_TIMEOUT_MS).catch(() => null)
+        : Promise.resolve(null)
     void this.maybeAutoTitle(t.title)
 
     // Publish queue depth (0 because we're starting the turn now).
@@ -1341,6 +1400,23 @@ export function toToolKind(toolName: string): ToolKind {
       return 'edit'
     case 'bash':
       return 'execute'
+    case 'grep':
+    case 'find':
+    case 'ls':
+    case 'rg':
+      return 'search'
+    case 'trash':
+    case 'rm':
+      return 'delete'
+    case 'mv':
+    case 'move':
+    case 'rename':
+      return 'move'
+    case 'fetch':
+    case 'web_fetch':
+      return 'fetch'
+    case 'todo':
+      return 'think'
     default:
       return 'other'
   }

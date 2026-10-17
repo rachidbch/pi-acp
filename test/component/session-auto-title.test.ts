@@ -69,6 +69,10 @@ test('PiAcpSession: preserves an existing session name', async () => {
   assert.equal(setNameCalls, 0)
   const titleUpdates = conn.updates.filter(update => (update.update as any).title !== undefined)
   assert.equal((titleUpdates.at(-1)!.update as any).title, 'Manual title')
+  assert.match(
+    String((titleUpdates.at(-1)!.update as any).updatedAt),
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
+  )
 })
 
 test('PiAcpSession: does not overwrite a manual name assigned during the first prompt', async () => {
@@ -89,6 +93,10 @@ test('PiAcpSession: does not overwrite a manual name assigned during the first p
   assert.deepEqual(assignedNames, ['Automatic title', 'Manual title'])
   const titleUpdates = conn.updates.filter(update => (update.update as any).title !== undefined)
   assert.equal((titleUpdates.at(-1)!.update as any).title, 'Manual title')
+  assert.match(
+    String((titleUpdates.at(-1)!.update as any).updatedAt),
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
+  )
 })
 
 test('PiAcpSession: auto-title failures do not fail the prompt', async () => {

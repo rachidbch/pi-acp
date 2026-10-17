@@ -52,6 +52,14 @@ Expect some minor breaking changes.
   - Reports pi's real context occupancy (`get_session_stats` → `contextUsage`) to the client as ACP `usage_update` after each turn, on `session/new` and `session/load`, and after a model switch
   - Requires a pi version whose `get_session_stats` response includes `contextUsage`; otherwise no usage is reported
   - Right after compaction pi may not have a trustworthy token count yet, so the client keeps the previous value until the next model response
+- Per-turn token usage (`PromptResponse.usage`, unstable)
+  - pi only exposes cumulative context tokens, so per-turn usage is derived from context snapshots taken at turn start and turn end: `inputTokens` = context at turn start (prior turns included), `outputTokens` = context growth (assistant output plus tool results), `totalTokens` = context after the turn. This is context-growth attribution, not billed API tokens; real cost flows separately via `usage_update.cost`
+  - Usage is omitted when either snapshot is missing or the context shrank mid-turn (compaction), and on cancelled or failed turns
+- Session lifecycle
+  - `session/new`, `session/load`, `session/resume`, `session/list`, `session/delete`, `session/close` and `session/fork` (unstable) are supported
+  - `session/fork` branches the stored pi session file into a new session using pi's native `--fork`
+  - On-demand recovery re-spawns a stored session's process on the next request; a per-session respawn budget (default 3 attempts per 10 minutes) stops crash loops without affecting other sessions
+- `additionalDirectories` is accepted on session requests but ignored with a stderr warning: pi supports a single working directory per session, so the capability is not advertised
 - Skills are loaded by pi directly and are available in ACP sessions
 - Session creation and loading reclaim idle subprocesses without interrupting active turns in other threads on the same connection.
 - Quiet active turns send a no-op session update every 75 seconds as a safeguard against host idle recycling. The Air idle-recycling cause has not been confirmed. Set `PI_ACP_KEEPALIVE_MS=0` to disable it.
@@ -141,6 +149,7 @@ Point your ACP client to the built `dist/index.js`:
 ### Environment variables
 
 - `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
+- `PI_ACP_RESPAWN_MAX_ATTEMPTS` (default 3), `PI_ACP_RESPAWN_WINDOW_MS` (default 600000) tune the per-session respawn budget for on-demand recovery. When the budget is exhausted the pending request fails with a `respawn_budget_exhausted` error and a stderr warning until the window clears.
 - Default: unset/any other value means `false`.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
 
@@ -224,8 +233,9 @@ Project layout:
 ## Limitations
 
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
+- Provider and auth posture (intentional): `providers/list` returns an empty list because pi manages its own providers and credentials; `authenticate` is a successful no-op (credentials are handled out-of-band by pi, e.g. `pi --terminal-login`); `logout` is not advertised because pi credentials cannot be cleared from the adapter. Clients that require a logout capability should not enable it for this agent.
 - MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
-- Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
+- Thought streaming is emitted as `agent_thought_chunk` when pi reports thinking deltas; assistant text streams as `agent_message_chunk`.
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
 - ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
 

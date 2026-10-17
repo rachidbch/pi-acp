@@ -28,11 +28,13 @@ import {
   type SetSessionModeResponse,
   type StopReason,
   type DeleteSessionRequest,
-  type DeleteSessionResponse
+  type DeleteSessionResponse,
+  type ForkSessionRequest,
+  type ForkSessionResponse
 } from '@agentclientprotocol/sdk'
 import type { AcpClient } from './connection.js'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, toToolKind, type PiAcpSession } from './session.js'
+import { SessionManager, toToolKind, type PiAcpSession, type TurnUsage } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions.js'
@@ -130,12 +132,68 @@ import { fileURLToPath } from 'node:url'
 
 const pkg = readNearestPackageJson(import.meta.url)
 
+/**
+ * pi supports a single working directory per session; additionalDirectories is
+ * accepted (per the ACP extensibility rule) but cannot be honored, so warn
+ * instead of failing the request. The capability is never advertised.
+ */
+function warnAdditionalDirectories(method: string, dirs: unknown): void {
+  if (Array.isArray(dirs) && dirs.length > 0) {
+    process.stderr
+      .write(`[pi-acp] ${method}: additionalDirectories is not supported by pi; ignoring ${dirs.length} path(s)
+`)
+  }
+}
+
+/** Parse an integer env override, falling back to the given default. */
+function respawnEnvInt(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return fallback
+  const value = Number.parseInt(raw, 10)
+  return Number.isFinite(value) && value >= 0 ? value : fallback
+}
+
 export class PiAcpAgent implements ACPAgent {
   private readonly conn: AcpClient
   private readonly sessions = new SessionManager()
   private readonly store = new SessionStore()
   private clientCapabilities: ClientCapabilities = {}
   private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
+
+  /**
+   * Respawn guard for on-demand recovery (codex AppServerRecovery pattern): a stored
+   * session whose pi process keeps dying must not be respawned without bound. Each
+   * restore attempt acquires a per-session slot; strikes are isolated per session so
+   * one bad session cannot lock out others. Tunable via PI_ACP_RESPAWN_* env vars.
+   */
+  private readonly respawnAttempts = new Map<string, number[]>()
+  // Env overrides are read per attempt (not at class-definition time) so operators
+  // and tests can tune them after module load.
+  private get respawnWindowMs(): number {
+    return respawnEnvInt('PI_ACP_RESPAWN_WINDOW_MS', 10 * 60 * 1000)
+  }
+  private get respawnMaxAttempts(): number {
+    return respawnEnvInt('PI_ACP_RESPAWN_MAX_ATTEMPTS', 3)
+  }
+
+  /**
+   * Records a restore attempt, refusing spawns beyond the per-session budget.
+   * Synchronous by design: the common path must not add microtasks before the
+   * spawn call. No sleep-based backoff: fast consecutive restores are legitimate
+   * (client reloads, test flows), and the budget cap already bounds a crash loop.
+   */
+  private tryAcquireRespawnSlot(sessionId: string): void {
+    const now = Date.now()
+    const windowStart = now - this.respawnWindowMs
+    const attempts = (this.respawnAttempts.get(sessionId) ?? []).filter(ts => ts >= windowStart)
+    if (attempts.length >= this.respawnMaxAttempts) {
+      const message = `pi respawn budget exhausted for session ${sessionId}: ${attempts.length} restore attempts within ${Math.round(this.respawnWindowMs / 1000)}s; refusing another respawn until the window clears`
+      process.stderr.write(`[pi-acp] ${message}\n`)
+      throw RequestError.internalError({ reason: 'respawn_budget_exhausted' }, message)
+    }
+    attempts.push(now)
+    this.respawnAttempts.set(sessionId, attempts)
+  }
 
   dispose(): void {
     this.sessions.disposeAll()
@@ -206,6 +264,8 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       const cwd = opts?.cwd ?? stored.cwd
+
+      this.tryAcquireRespawnSlot(sessionId)
 
       const mcpInjection = opts?.mcpServers?.length ? prepareMcpInjection(opts.mcpServers) : null
       let proc: PiRpcProcess
@@ -293,7 +353,10 @@ export class PiAcpAgent implements ACPAgent {
           list: {},
           delete: {},
           resume: {},
-          close: {}
+          close: {},
+          // **UNSTABLE** Fork branches the stored pi session file into a new
+          // session via pi's native `--fork`.
+          fork: {}
         },
         _meta: {
           // UNSTABLE claude-agent-acp contract. Auth discovery can read either this
@@ -330,6 +393,7 @@ export class PiAcpAgent implements ACPAgent {
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
+    warnAdditionalDirectories('session/new', (params as { additionalDirectories?: unknown }).additionalDirectories)
 
     this.lastSessionCwd = params.cwd
 
@@ -982,7 +1046,14 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const result = await session.prompt(message, images, promptToSessionTitle(params.prompt) ?? undefined, signal)
+    const usageOut: { usage?: TurnUsage } = {}
+    const result = await session.prompt(
+      message,
+      images,
+      promptToSessionTitle(params.prompt) ?? undefined,
+      signal,
+      usageOut
+    )
 
     // ACP v1 reports failures as request errors, not successful end_turn responses.
     if (result === 'error' && !session.wasCancelRequested()) {
@@ -990,7 +1061,7 @@ export class PiAcpAgent implements ACPAgent {
     }
     const stopReason: StopReason = result === 'error' ? 'cancelled' : result
 
-    return { stopReason }
+    return { stopReason, ...(usageOut.usage ? { usage: usageOut.usage } : {}) }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -1032,6 +1103,7 @@ export class PiAcpAgent implements ACPAgent {
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
+    warnAdditionalDirectories('session/load', (params as { additionalDirectories?: unknown }).additionalDirectories)
 
     // If the client is re-loading a session that is already active, tear down the existing
     // pi subprocess so we can start fresh and re-advertise commands reliably.
@@ -1235,6 +1307,66 @@ export class PiAcpAgent implements ACPAgent {
     }, 0)
 
     return response
+  }
+
+  async forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+    if (!isAbsolute(params.cwd)) {
+      throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
+    }
+    warnAdditionalDirectories('session/fork', params.additionalDirectories)
+
+    const stored = this.findStoredSession(params.sessionId)
+    if (!stored) {
+      throw RequestError.invalidParams(`Unknown sessionId: ${params.sessionId}`)
+    }
+
+    const mcpInjection = params.mcpServers?.length ? prepareMcpInjection(params.mcpServers) : null
+    let proc: PiRpcProcess
+    try {
+      proc = await PiRpcProcess.spawn({
+        cwd: params.cwd,
+        forkSessionPath: stored.sessionFile,
+        piCommand: process.env.PI_ACP_PI_COMMAND,
+        ...(mcpInjection ? { mcpInjection } : {})
+      })
+    } catch (e: any) {
+      mcpInjection?.cleanup()
+      if (e?.name === 'PiRpcSpawnError') {
+        throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
+      }
+      throw e
+    }
+
+    let state: any = null
+    try {
+      state = (await proc.getState()) as any
+    } catch {
+      state = null
+    }
+    const sessionId = typeof state?.sessionId === 'string' ? state.sessionId : crypto.randomUUID()
+    const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
+
+    const fileCommands = loadSlashCommands(params.cwd)
+    // Registers the forked session so subsequent requests address it directly.
+    this.sessions.getOrCreate(sessionId, {
+      cwd: params.cwd,
+      mcpServers: params.mcpServers ?? [],
+      conn: this.conn,
+      proc,
+      fileCommands,
+      mcpInjection,
+      clientCapabilities: this.clientCapabilities
+    })
+
+    try {
+      this.lastSessionCwd = params.cwd
+      if (sessionFile) this.store.upsert({ sessionId, cwd: params.cwd, sessionFile })
+      const { configOptions, modes } = await getSessionConfiguration(proc)
+      return { sessionId, modes, configOptions }
+    } catch (err) {
+      this.sessions.close(sessionId)
+      throw err
+    }
   }
 
   async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {

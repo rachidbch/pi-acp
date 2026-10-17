@@ -958,7 +958,8 @@ test('PiAcpSession: emits usage_update from contextUsage before resolving prompt
   releaseDelivery!()
 
   assert.equal(await p, 'end_turn')
-  assert.equal(proc.getSessionStatsCount, 1)
+  // Turn-start snapshot (for PromptResponse.usage) plus the completion fetch.
+  assert.equal(proc.getSessionStatsCount, 2)
   assert.deepEqual(
     conn.updates.filter(u => u.update.sessionUpdate === 'usage_update').map(u => u.update),
     [{ sessionUpdate: 'usage_update', used: 12_345, size: 200_000 }]
@@ -1049,7 +1050,8 @@ test('PiAcpSession: get_session_stats rejection does not break the prompt', asyn
   proc.emit({ type: 'agent_settled' })
 
   assert.equal(await p, 'end_turn')
-  assert.equal(proc.getSessionStatsCount, 1)
+  // Turn-start snapshot (for PromptResponse.usage) plus the completion fetch.
+  assert.equal(proc.getSessionStatsCount, 2)
   assert.equal(
     conn.updates.some(u => u.update.sessionUpdate === 'usage_update'),
     false
@@ -1076,7 +1078,8 @@ test('PiAcpSession: get_session_stats timeout does not block the prompt', async 
   proc.emit({ type: 'agent_settled' })
 
   assert.equal(await p, 'end_turn')
-  assert.equal(proc.getSessionStatsCount, 1)
+  // Turn-start snapshot (for PromptResponse.usage) plus the completion fetch.
+  assert.equal(proc.getSessionStatsCount, 2)
   assert.equal(
     conn.updates.some(u => u.update.sessionUpdate === 'usage_update'),
     false

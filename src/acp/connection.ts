@@ -32,6 +32,7 @@ export function connectPiAgent(stream: Stream): { agent: PiAcpAgent; connection:
     .onRequest('session/close', ctx => implementation.closeSession(ctx.params))
     .onRequest('session/list', ctx => implementation.listSessions(ctx.params))
     .onRequest('session/delete', ctx => implementation.deleteSession(ctx.params))
+    .onRequest('session/fork', ctx => implementation.forkSession(ctx.params))
     .onRequest('session/set_mode', ctx => implementation.setSessionMode(ctx.params))
     .onRequest('session/set_config_option', ctx => implementation.setSessionConfigOption(ctx.params))
     .onRequest('session/prompt', ctx => implementation.prompt(ctx.params, ctx.signal))

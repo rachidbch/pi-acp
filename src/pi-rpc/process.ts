@@ -122,6 +122,8 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** If set, pi branches the given session file into a new session (via `--fork <path>`). */
+  forkSessionPath?: string
   /** Client-provided MCP servers to inject into pi (see acp/mcp-descriptor.ts). */
   mcpInjection?: McpInjectionPlan
 }
@@ -391,6 +393,7 @@ export class PiRpcProcess {
     const args = ['--mode', 'rpc', '--no-themes']
     if (mcpBootstrapPath) args.push('-e', mcpBootstrapPath)
     if (params.sessionPath) args.push('--session', params.sessionPath)
+    if (params.forkSessionPath) args.push('--fork', params.forkSessionPath)
 
     const childEnv: NodeJS.ProcessEnv = { ...process.env }
     delete childEnv[PI_ACP_MCP_DESCRIPTOR_ENV]
