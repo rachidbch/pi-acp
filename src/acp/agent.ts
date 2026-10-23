@@ -168,7 +168,9 @@ export class PiAcpAgent {
   /**
    * Respawn guard for on-demand recovery (codex AppServerRecovery pattern): a stored
    * session whose pi process keeps dying must not be respawned without bound. Each
-   * restore attempt acquires a per-session slot; strikes are isolated per session so
+   * on-demand restore (a request for a session that has no live process; `session/load`
+   * and `session/resume` restore by the client's own choice and do not count) acquires
+   * a per-session slot; strikes are isolated per session so
    * one bad session cannot lock out others. Tunable via PI_ACP_RESPAWN_* env vars.
    */
   private readonly respawnAttempts = new Map<string, number[]>()
@@ -259,7 +261,7 @@ export class PiAcpAgent {
       if (!cwd) throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
       const sessionFile = this.requireSessionFile(sessionId, cwd)
 
-      this.tryAcquireRespawnSlot(sessionId)
+      if (!opts?.cwd) this.tryAcquireRespawnSlot(sessionId)
 
       const mcpInjection = opts?.mcpServers?.length ? prepareMcpInjection(opts.mcpServers) : null
       let proc: PiRpcProcess
@@ -514,16 +516,7 @@ export class PiAcpAgent {
     const mcpSection = launch.headless ? null : buildMcpStartupSection(session.mcpInjection)
     if (mcpSection) preludeText = preludeText ? `${preludeText}${mcpSection}` : mcpSection
 
-    if (preludeText)
-      session.setStartupInfo(preludeText)
-
-      // Policy: within a single ACP connection, sweep idle sessions so unused pi
-      // subprocesses do not leak. Sessions with an in-flight turn are skipped:
-      // some hosts share one connection across several threads, and closing
-      // a busy session cancels that thread's conversation mid-turn.
-      //
-      // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeIdleExcept?.(session.sessionId)
+    if (preludeText) session.setStartupInfo(preludeText)
 
     const response = {
       sessionId: session.sessionId,
@@ -1051,7 +1044,7 @@ export class PiAcpAgent {
       }
     }
 
-    const usageOut: { usage?: TurnUsage; summary?: TurnSummary } = {}
+    const usageOut: { usage?: TurnUsage; summary?: TurnSummary; error?: string } = {}
     const result = await session.prompt(
       message,
       images,
@@ -1062,7 +1055,8 @@ export class PiAcpAgent {
 
     // ACP v1 reports failures as request errors, not successful end_turn responses.
     if (result === 'error' && !session.wasCancelRequested()) {
-      throw RequestError.internalError({}, 'Pi prompt failed')
+      const reason = usageOut.error ?? 'Pi prompt failed'
+      throw RequestError.internalError({ reason }, reason)
     }
     const stopReason: StopReason = result === 'error' ? 'cancelled' : result
 
@@ -1138,11 +1132,6 @@ export class PiAcpAgent {
     }
     const { configOptions, models, modes } = configuration
     const fileCommands = loadSlashCommands(params.cwd)
-
-    // Sweep idle sessions within each ACP connection; busy ones are skipped
-    // (see newSession — hosts may share one connection across threads).
-    // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeIdleExcept?.(session.sessionId)
 
     // Replay full conversation history.
     const data = (await proc.getMessages()) as any

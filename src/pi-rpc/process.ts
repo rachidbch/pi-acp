@@ -94,6 +94,15 @@ const STARTUP_EVENT_MAX_BYTES = 4 * 1024 * 1024
 /** Maximum wait for an auxiliary context-usage update. */
 export const SESSION_STATS_TIMEOUT_MS = 1_000
 
+/** Default wait for a control RPC (and the `prompt` acknowledgement); turns themselves have no deadline. */
+export const CONTROL_TIMEOUT_MS = 30_000
+
+/** `compact` runs a model call, so it gets a longer deadline than other control RPCs. */
+const COMPACT_TIMEOUT_MS = 300_000
+
+/** Time between SIGTERM and SIGKILL when stopping pi's process group. */
+export const KILL_GRACE_MS = 3_000
+
 /**
  * Shape of `stats.contextUsage` in pi's `get_session_stats` response.
  * `tokens` is null while pi has no trustworthy token count (e.g. right after compaction).
@@ -132,6 +141,8 @@ type SpawnParams = {
   launchArgs?: string[]
   /** System prompt from `_meta.systemPrompt`, passed to pi through a private temp file. */
   systemPrompt?: SystemPrompt
+  /** Grace between SIGTERM and SIGKILL on dispose (default `KILL_GRACE_MS`). */
+  killGraceMs?: number
 }
 
 const MIN_PI_VERSION_FOR_MCP_INJECTION = '1.0.0'
@@ -288,11 +299,14 @@ export class PiRpcProcess {
   private startupEvents: PiRpcEvent[] | null = []
   private startupEventBytes = 0
   private terminalError: Error | undefined
+  private closed = false
+  private killTimer: ReturnType<typeof setTimeout> | undefined
 
   private constructor(
     child: ChildProcessWithoutNullStreams,
     mcpInjection: McpInjectionPlan | null,
-    removePromptFile: () => void
+    removePromptFile: () => void,
+    private readonly killGraceMs = KILL_GRACE_MS
   ) {
     this.child = child
     this.mcpInjection = mcpInjection
@@ -359,7 +373,13 @@ export class PiRpcProcess {
       }
     })
 
-    child.on('exit', (code, signal) => {
+    // 'close', not 'exit': it fires after stdout is drained, so the dying child's last
+    // words (a final message_end error) reach the handlers before the exit is reported.
+    child.on('close', (code, signal) => {
+      this.closed = true
+      clearTimeout(this.killTimer)
+      if (stdoutRest.trim()) onLine(stdoutRest.replace(/\r$/, ''))
+      stdoutRest = ''
       this.mcpInjection?.cleanup()
       this.fail(new Error(`pi process exited (code=${code}, signal=${signal})`))
     })
@@ -417,7 +437,9 @@ export class PiRpcProcess {
     const child = start(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: childEnv
+      env: childEnv,
+      // Own process group (POSIX), so dispose reaches pi's tool and MCP children too.
+      detached: process.platform !== 'win32'
     }) as ChildProcessWithoutNullStreams
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
@@ -474,7 +496,7 @@ export class PiRpcProcess {
     // The prompt file lives exactly as long as the pi child that reads it: removed on its
     // close, and synchronously in dispose() because the adapter exits right after it.
     child.once('close', () => systemPrompt.dispose())
-    const proc = new PiRpcProcess(child, mcpInjection, systemPrompt.dispose)
+    const proc = new PiRpcProcess(child, mcpInjection, systemPrompt.dispose, params.killGraceMs)
 
     // Best-effort handshake.
     // Important: pi may emit a get_state response pointing at a sessionFile in a directory
@@ -528,11 +550,22 @@ export class PiRpcProcess {
     this.mcpInjection?.cleanup()
     this.removePromptFile()
     this.fail(new Error('pi process disposed'))
-    if (this.child.killed) return
+    if (this.closed) return
+    this.signalGroup(signal)
+    if (signal !== 'SIGKILL' && this.killTimer === undefined) {
+      this.killTimer = setTimeout(() => this.signalGroup('SIGKILL'), this.killGraceMs)
+      this.killTimer.unref?.()
+    }
+  }
+
+  /** Signal pi and everything it started: its group on POSIX (pi leads it, see spawn), else pi alone. */
+  private signalGroup(signal: NodeJS.Signals | number): void {
+    const pid = this.child.pid
     try {
-      this.child.kill(signal as any)
+      if (pid !== undefined && process.platform !== 'win32') process.kill(-pid, signal)
+      else this.child.kill(signal as NodeJS.Signals)
     } catch {
-      // ignore
+      // already gone
     }
   }
 
@@ -626,7 +659,7 @@ export class PiRpcProcess {
   }
 
   async compact(customInstructions?: string): Promise<unknown> {
-    const res = await this.request({ type: 'compact', customInstructions })
+    const res = await this.request({ type: 'compact', customInstructions }, { timeoutMs: COMPACT_TIMEOUT_MS })
     if (!res.success) throw new Error(`pi compact failed: ${res.error ?? JSON.stringify(res.data)}`)
     return res.data
   }
@@ -682,7 +715,7 @@ export class PiRpcProcess {
     if (this.terminalError) return Promise.reject(this.terminalError)
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
-    const timeoutMs = opts?.timeoutMs
+    const timeoutMs = opts?.timeoutMs ?? CONTROL_TIMEOUT_MS
 
     const line = `${JSON.stringify(withId)}\n`
 
@@ -715,15 +748,13 @@ export class PiRpcProcess {
         }
       })
 
-      if (timeoutMs !== undefined) {
-        timer = setTimeout(() => {
-          timer = undefined
-          if (!this.pending.delete(id)) return
-          reject(Object.assign(new Error(`pi ${cmd.type} timed out after ${timeoutMs}ms`), { code: 'ETIMEDOUT' }))
-        }, timeoutMs)
-        // Never let an auxiliary request keep the event loop alive.
-        timer.unref?.()
-      }
+      timer = setTimeout(() => {
+        timer = undefined
+        if (!this.pending.delete(id)) return
+        reject(Object.assign(new Error(`pi ${cmd.type} timed out after ${timeoutMs}ms`), { code: 'ETIMEDOUT' }))
+      }, timeoutMs)
+      // Never let a pending request keep the event loop alive.
+      timer.unref?.()
 
       void this.writeLine(line).catch(error => {
         if (!drop()) return

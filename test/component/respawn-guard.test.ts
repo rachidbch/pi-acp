@@ -58,16 +58,14 @@ function restoreEnv(backup: EnvBackup): void {
   }
 }
 
-async function load(agent: PiAcpAgent, sessionId: string): Promise<unknown> {
-  return agent.loadSession({
-    sessionId,
-    cwd: '/tmp/project',
-    mcpServers: [],
-    _meta: null
-  } as never)
+/** A request for a session without a live process (closed or crashed): restored on demand, no load/resume. */
+async function restoreOnDemand(agent: PiAcpAgent, sessionId: string): Promise<void> {
+  Reflect.get(agent, 'cwds').set(sessionId, '/tmp/project')
+  await Reflect.get(agent, 'restoreSession').call(agent, sessionId)
+  await agent.closeSession({ sessionId })
 }
 
-test('restore attempts are budgeted per session and refuse after exhaustion', { timeout: 5000 }, async t => {
+test('on-demand restores are budgeted per session and refuse after exhaustion', { timeout: 5000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'pi-acp-respawn-'))
   writeStoredSession(root, 'sess-crashy')
   writeStoredSession(root, 'sess-healthy')
@@ -90,13 +88,13 @@ test('restore attempts are budgeted per session and refuse after exhaustion', { 
   const conn = new FakeAgentSideConnection()
   const agent = new PiAcpAgent(asAgentConn(conn))
 
-  await load(agent, 'sess-crashy')
-  await load(agent, 'sess-crashy')
+  await restoreOnDemand(agent, 'sess-crashy')
+  await restoreOnDemand(agent, 'sess-crashy')
   assert.equal(spawnCalls, 2)
-  await assert.rejects(load(agent, 'sess-crashy'), /respawn budget exhausted/)
+  await assert.rejects(restoreOnDemand(agent, 'sess-crashy'), /respawn budget exhausted/)
 
   // Strike isolation: another session is unaffected by the exhausted budget.
-  await load(agent, 'sess-healthy')
+  await restoreOnDemand(agent, 'sess-healthy')
   assert.equal(spawnCalls, 3)
 })
 
@@ -122,9 +120,39 @@ test('respawn budget recovers after the window clears', { timeout: 5000 }, async
   const conn = new FakeAgentSideConnection()
   const agent = new PiAcpAgent(asAgentConn(conn))
 
-  await load(agent, 'sess-window')
-  await assert.rejects(load(agent, 'sess-window'), /respawn budget exhausted/)
+  await restoreOnDemand(agent, 'sess-window')
+  await assert.rejects(restoreOnDemand(agent, 'sess-window'), /respawn budget exhausted/)
   await new Promise(resolve => setTimeout(resolve, 450))
-  await load(agent, 'sess-window')
+  await restoreOnDemand(agent, 'sess-window')
   assert.equal(spawnCalls, 2)
+})
+
+test('session/load and session/resume restores never count against the budget', { timeout: 5000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-acp-respawn-'))
+  writeStoredSession(root, 'sess-explicit')
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = root
+  const backup = setRespawnEnv(1, 60_000)
+  const originalSpawn = PiRpcProcess.spawn
+  let spawnCalls = 0
+  ;(PiRpcProcess as { spawn: unknown }).spawn = async () => {
+    spawnCalls++
+    return stubProc()
+  }
+  t.after(() => {
+    ;(PiRpcProcess as { spawn: unknown }).spawn = originalSpawn
+    restoreEnv(backup)
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir
+  })
+
+  const agent = new PiAcpAgent(asAgentConn(new FakeAgentSideConnection()))
+  const request = { sessionId: 'sess-explicit', cwd: '/tmp/project', mcpServers: [] } as never
+  for (let i = 0; i < 3; i++) {
+    await agent.loadSession(request)
+    await agent.closeSession({ sessionId: 'sess-explicit' })
+    await agent.resumeSession(request)
+    await agent.closeSession({ sessionId: 'sess-explicit' })
+  }
+  assert.equal(spawnCalls, 6)
 })

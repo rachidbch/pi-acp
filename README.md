@@ -52,7 +52,7 @@ Point the client at the installed `pi-acp` binary (or `node …/dist/index.js`).
 
 - Full prompt streaming: assistant text as `agent_message_chunk`, thinking deltas as `agent_thought_chunk`, tool activity as `tool_call`/`tool_call_update` with locations and structured edit diffs
 - Live terminal output for running shell commands (when the client advertises terminal support)
-- Session lifecycle: `session/new`, `session/load`, `session/list`, `session/resume`, `session/fork`, `session/delete`, `session/close`, with on-demand respawn of dead sessions behind a per-session crash budget
+- Session lifecycle: `session/new`, `session/load`, `session/list`, `session/resume`, `session/fork`, `session/delete`, `session/close`. Load and resume find the pi session file from the session id and cwd in pi's own session directory (`PI_CODING_AGENT_SESSION_DIR`, then `settings.json` `sessionDir`, then `<agent dir>/sessions/--<cwd>--/`), with no adapter-side index. Requests for a session with no live process respawn it on demand, behind a per-session crash budget
 - Scoped cancellation: `$/cancel_request` cancels one request; other queued prompts are unaffected
 - Per-turn token usage (`PromptResponse.usage`, unstable) and context occupancy (`usage_update`) with real cost when Pi reports it
 - Compaction, session notices, and auth negotiation, each gated on client capabilities

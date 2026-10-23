@@ -62,6 +62,8 @@ export class FakePiRpcProcess {
   }
 
   promptDisposition: PiPromptDisposition | undefined
+  /** When set, `prompt()` rejects with it (pi refused the prompt). */
+  promptError: Error | null = null
 
   async prompt(
     message: string,
@@ -70,6 +72,7 @@ export class FakePiRpcProcess {
     onDisposition?: (disposition: PiPromptDisposition | undefined) => void
   ): Promise<PiPromptDisposition | undefined> {
     this.prompts.push({ message, attachments })
+    if (this.promptError) throw this.promptError
     onDisposition?.(this.promptDisposition)
     return this.promptDisposition
   }

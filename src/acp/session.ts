@@ -75,8 +75,8 @@ type QueuedTurn = {
   title?: string
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
-  /** Filled with derived per-turn usage (when computable) and the turn summary before the turn resolves. */
-  usageOut?: { usage?: TurnUsage; summary?: TurnSummary }
+  /** Filled before the turn resolves: derived usage (when computable), the turn summary, and pi's reason when the turn ends 'error'. */
+  usageOut?: { usage?: TurnUsage; summary?: TurnSummary; error?: string }
 }
 
 /**
@@ -284,15 +284,6 @@ export class SessionManager {
     this.sessions.delete(sessionId)
   }
 
-  /** Reclaim idle sessions without interrupting other threads' active turns. */
-  closeIdleExcept(keepSessionId: string): void {
-    for (const [id, session] of this.sessions) {
-      if (id === keepSessionId) continue
-      if (session.isTurnActive()) continue
-      this.close(id)
-    }
-  }
-
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
@@ -432,6 +423,8 @@ export class PiAcpSession {
   private lastEmit: Promise<void> = Promise.resolve()
   private disposed = false
   private disposalReason: StopReason | undefined
+  /** Why the pi process stopped, from its terminal error. */
+  private failure: string | undefined
   private unsubscribe: (() => void) | undefined
   private keepaliveTimer: NodeJS.Timeout | null = null
   private lastUpdateSentAt = Date.now()
@@ -549,6 +542,11 @@ export class PiAcpSession {
     const turn = this.pendingTurn
     this.pendingTurn = null
     const queued = this.turnQueue.splice(0)
+    if (reason === 'error') {
+      // pi's own last words (final message_end error) beat the bare exit report.
+      const why = turn?.errorMessage ?? this.failure
+      for (const item of [turn?.queued, ...queued]) if (item?.usageOut) item.usageOut.error = why
+    }
     void this.flushEmits().then(() => {
       turn?.resolve(reason)
       for (const item of queued) item.resolve(reason)
@@ -582,7 +580,7 @@ export class PiAcpSession {
     images: unknown[] = [],
     title?: string,
     signal?: AbortSignal,
-    usageOut?: { usage?: TurnUsage; summary?: TurnSummary }
+    usageOut?: { usage?: TurnUsage; summary?: TurnSummary; error?: string }
   ): Promise<StopReason> {
     if (this.disposed || signal?.aborted) return 'cancelled'
     // pi RPC mode disables slash command expansion, so we do it here.
@@ -780,6 +778,8 @@ export class PiAcpSession {
   private async completeTurn(turn: PendingTurn): Promise<void> {
     if (this.pendingTurn !== turn || turn.completing || !turn.acknowledged) return
     turn.completing = true
+    // pi aborts on its own too (settled with aborted:true): still cancelled, flagged in the summary.
+    const cancelled = this.cancelRequested || turn.outcome === 'cancelled' || turn.summary.aborted
     this.finishOutstandingTools(this.cancelRequested ? 'Cancelled.' : 'Turn ended before the tool completed.')
     // Ensure all updates derived from pi events (plus the final usage update) are
     // delivered before we resolve the ACP `session/prompt` request.
@@ -787,11 +787,10 @@ export class PiAcpSession {
     if (this.pendingTurn !== turn) return
     this.pendingTurn = null
     if (turn.queued.usageOut) {
-      const stopReason: StopReason =
-        this.cancelRequested || turn.outcome === 'cancelled' ? 'cancelled' : (turn.outcome ?? 'end_turn')
+      const stopReason: StopReason = cancelled ? 'cancelled' : (turn.outcome ?? 'end_turn')
       turn.queued.usageOut.summary = { ...turn.summary, stopReason }
     }
-    if (this.cancelRequested || turn.outcome === 'cancelled') turn.resolve('cancelled')
+    if (cancelled) turn.resolve('cancelled')
     else if (turn.outcome === 'error') {
       const error = new Error(turn.errorMessage || 'Pi provider failed')
       turn.reject(
@@ -953,6 +952,7 @@ export class PiAcpSession {
         if (this.pendingTurn !== turn) return
         const authErr = maybeAuthRequiredError(err, this.clientCapabilities)
         this.pendingTurn = null
+        if (turn.queued.usageOut) turn.queued.usageOut.error = err instanceof Error ? err.message : String(err)
         if (this.cancelRequested) turn.resolve('cancelled')
         else if (authErr) turn.reject(authErr)
         else turn.resolve(this.cancelRequested ? 'cancelled' : 'error')
@@ -1064,7 +1064,8 @@ export class PiAcpSession {
       }
 
       case 'pi_acp_process_error': {
-        this.emitNotice(typeof ev.message === 'string' ? ev.message : 'Pi process stopped.', 'error')
+        this.failure = typeof ev.message === 'string' ? ev.message : undefined
+        this.emitNotice(this.failure ?? 'Pi process stopped.', 'error')
         this.finishOutstandingTools('Pi process stopped.')
         this.dispose('error')
         break
@@ -1352,7 +1353,12 @@ export class PiAcpSession {
       }
 
       case 'auto_retry_end': {
-        this.emitNotice('Retry finished, resuming.')
+        if (ev.success === false)
+          this.emitNotice(
+            `Retry failed: ${typeof ev.finalError === 'string' ? ev.finalError : 'unknown error'}`,
+            'error'
+          )
+        else this.emitNotice('Retry finished, resuming.')
         break
       }
 
