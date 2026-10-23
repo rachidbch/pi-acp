@@ -1,4 +1,4 @@
-import { RequestError, type ClientCapabilities } from '@agentclientprotocol/sdk'
+import { RequestError, type ClientCapabilities } from '@agentclientprotocol/sdk/unstable'
 import { getAuthMethods } from './auth.js'
 
 /**

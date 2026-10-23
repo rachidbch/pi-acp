@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type {
-  AgentSideConnection,
   ClientCapabilities,
   CreateElicitationRequest,
   CreateElicitationResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionUpdate
-} from '@agentclientprotocol/sdk'
-import { CreateElicitationRequest as elicitationRequestGuard } from '@agentclientprotocol/sdk'
+} from '@agentclientprotocol/sdk/unstable'
+import { CreateElicitationRequest as elicitationRequestGuard } from '@agentclientprotocol/sdk/unstable'
 import { handleExtensionUiRequest, type ExtensionUiHost, type ExtensionUiResponse } from '../../src/acp/extension-ui.js'
 
+import type { AcpClient } from '../../src/acp/connection.js'
 function fixture(capabilities?: ClientCapabilities) {
   const connection = new AbortController()
   const session = new AbortController()
@@ -33,7 +33,7 @@ function fixture(capabilities?: ClientCapabilities) {
       forms.push(request)
       return answers.form()
     }
-  } as unknown as AgentSideConnection
+  } as unknown as AcpClient
   const host: ExtensionUiHost = {
     sessionId: 'session-1',
     conn,

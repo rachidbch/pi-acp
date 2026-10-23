@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, openSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { McpServer, McpServerStdio } from '@agentclientprotocol/sdk'
+import type { McpServer, McpServerStdio } from '@agentclientprotocol/sdk/unstable'
 
 export const PI_ACP_MCP_DESCRIPTOR_ENV = 'PI_ACP_MCP_DESCRIPTOR'
 

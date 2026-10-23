@@ -1,15 +1,23 @@
 import {
   agent as agentApp,
   type AgentConnection,
-  type AgentSideConnection,
+  type CreateElicitationRequest,
+  type CreateElicitationResponse,
+  type RequestPermissionRequest,
+  type RequestPermissionResponse,
+  type SessionNotification,
   type Stream
-} from '@agentclientprotocol/sdk'
+} from '@agentclientprotocol/sdk/unstable'
 import { PiAcpAgent } from './agent.js'
 
-export type AcpClient = Pick<
-  AgentSideConnection,
-  'signal' | 'sessionUpdate' | 'requestPermission' | 'createElicitation' | 'extNotification'
->
+/** The client-side calls the agent makes. SDK 2.x removed `AgentSideConnection`; this is its subset we use. */
+export type AcpClient = {
+  readonly signal: AbortSignal
+  sessionUpdate(params: SessionNotification): Promise<void>
+  requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse>
+  createElicitation(params: CreateElicitationRequest): Promise<CreateElicitationResponse>
+  extNotification(method: string, params?: Record<string, unknown>): Promise<void>
+}
 
 export function connectPiAgent(stream: Stream): { agent: PiAcpAgent; connection: AgentConnection } {
   let implementation!: PiAcpAgent

@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { ndJsonStream } from '@agentclientprotocol/sdk'
+import { ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { connectPiAgent } from '../../src/acp/connection.js'
 import { FakePiRpcProcess } from '../helpers/fakes.js'
-import type { AgentConnection } from '@agentclientprotocol/sdk'
+import type { AgentConnection } from '@agentclientprotocol/sdk/unstable'
 
 type Server = { agent: unknown; connection: AgentConnection }
 

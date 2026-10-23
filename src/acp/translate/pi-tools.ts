@@ -1,4 +1,4 @@
-import type { ContentBlock, ToolCallContent } from '@agentclientprotocol/sdk'
+import type { ContentBlock, ToolCallContent } from '@agentclientprotocol/sdk/unstable'
 import { z } from 'zod'
 
 // Local mirror of the SDK's ContentBlock zod schema: the SDK no longer exports it.

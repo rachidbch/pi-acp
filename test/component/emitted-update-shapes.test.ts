@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { client, ndJsonStream } from '@agentclientprotocol/sdk'
+import { client, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { connectPiAgent } from '../../src/acp/connection.js'
 import { SessionManager } from '../../src/acp/session.js'
 import { FakePiRpcProcess } from '../helpers/fakes.js'

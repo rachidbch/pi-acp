@@ -1,4 +1,4 @@
-import { ndJsonStream } from '@agentclientprotocol/sdk'
+import { ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { PiAcpAgent } from './acp/agent.js'
 import { connectPiAgent } from './acp/connection.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './pi-rpc/command.js'

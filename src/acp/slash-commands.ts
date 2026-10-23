@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import type { AvailableCommand } from '@agentclientprotocol/sdk'
+import type { AvailableCommand } from '@agentclientprotocol/sdk/unstable'
 
 /**
  * File-based slash command (mirrors pi-coding-agent semantics).

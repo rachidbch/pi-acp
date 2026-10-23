@@ -6,8 +6,8 @@ import type {
   ToolCallContent,
   ToolCallLocation,
   ToolKind
-} from '@agentclientprotocol/sdk'
-import { RequestError } from '@agentclientprotocol/sdk'
+} from '@agentclientprotocol/sdk/unstable'
+import { RequestError } from '@agentclientprotocol/sdk/unstable'
 import { randomUUID } from 'node:crypto'
 import type { AcpClient } from './connection.js'
 import { readFileSync } from 'node:fs'

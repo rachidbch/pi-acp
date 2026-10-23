@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { McpServer } from '@agentclientprotocol/sdk'
+import type { McpServer } from '@agentclientprotocol/sdk/unstable'
 import { buildMcpDescriptor, prepareMcpInjection } from '../../src/acp/mcp-descriptor.js'
 
 function stdioServer(overrides: Partial<McpServer> & Record<string, unknown> = {}): McpServer {

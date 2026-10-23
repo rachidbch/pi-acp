@@ -1,7 +1,6 @@
 import {
   PROTOCOL_VERSION,
   RequestError,
-  type Agent as ACPAgent,
   type AuthenticateRequest,
   type CancelNotification,
   type ClientCapabilities,
@@ -31,7 +30,7 @@ import {
   type DeleteSessionResponse,
   type ForkSessionRequest,
   type ForkSessionResponse
-} from '@agentclientprotocol/sdk'
+} from '@agentclientprotocol/sdk/unstable'
 import type { AcpClient } from './connection.js'
 import { getAuthMethods } from './auth.js'
 import { SessionManager, toToolKind, type PiAcpSession, type TurnUsage } from './session.js'
@@ -58,7 +57,7 @@ import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
-import type { AvailableCommand } from '@agentclientprotocol/sdk'
+import type { AvailableCommand } from '@agentclientprotocol/sdk/unstable'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { isDeepStrictEqual } from 'node:util'
@@ -153,7 +152,7 @@ function respawnEnvInt(name: string, fallback: number): number {
   return Number.isFinite(value) && value >= 0 ? value : fallback
 }
 
-export class PiAcpAgent implements ACPAgent {
+export class PiAcpAgent {
   private readonly conn: AcpClient
   private readonly sessions = new SessionManager()
   private readonly store = new SessionStore()

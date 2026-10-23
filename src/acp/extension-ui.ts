@@ -3,8 +3,8 @@ import type {
   ElicitationPropertySchema,
   PermissionOption,
   SessionUpdate
-} from '@agentclientprotocol/sdk'
-import { CreateElicitationResponse } from '@agentclientprotocol/sdk'
+} from '@agentclientprotocol/sdk/unstable'
+import { CreateElicitationResponse } from '@agentclientprotocol/sdk/unstable'
 import type { AcpClient } from './connection.js'
 
 export type ExtensionUiResponse = { id: string } & ({ value: string } | { confirmed: boolean } | { cancelled: true })
