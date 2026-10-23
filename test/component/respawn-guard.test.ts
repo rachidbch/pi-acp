@@ -105,7 +105,7 @@ test('respawn budget recovers after the window clears', { timeout: 5000 }, async
   writeStoredSession(root, 'sess-window')
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR
   process.env.PI_CODING_AGENT_DIR = root
-  const backup = setRespawnEnv(1, 60)
+  const backup = setRespawnEnv(1, 400)
   const originalSpawn = PiRpcProcess.spawn
   let spawnCalls = 0
   ;(PiRpcProcess as { spawn: unknown }).spawn = async () => {
@@ -124,7 +124,7 @@ test('respawn budget recovers after the window clears', { timeout: 5000 }, async
 
   await load(agent, 'sess-window')
   await assert.rejects(load(agent, 'sess-window'), /respawn budget exhausted/)
-  await new Promise(resolve => setTimeout(resolve, 70))
+  await new Promise(resolve => setTimeout(resolve, 450))
   await load(agent, 'sess-window')
   assert.equal(spawnCalls, 2)
 })
