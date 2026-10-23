@@ -8,8 +8,9 @@ import { fileURLToPath } from 'node:url'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 
-// Real pi behind PI_ACP_REAL_PI=1 (spends one tiny model call per test). Pi credentials
-// come from the real ~/.pi/agent; sessions go to a temp PI_CODING_AGENT_SESSION_DIR.
+// Real pi behind PI_ACP_REAL_PI=1 (spends one tiny model call per test). The suite isolates
+// HOME (test/helpers/isolate-home.ts); the argv wrapper hands pi the real one for its
+// credentials. Sessions go to a temp PI_CODING_AGENT_SESSION_DIR. Run it through `npm test`.
 // Model: PI_ACP_REAL_PI_MODEL (default zai/glm-5.3), thinking off.
 const enabled = process.env.PI_ACP_REAL_PI === '1'
 const model = process.env.PI_ACP_REAL_PI_MODEL ?? 'zai/glm-5.3'
@@ -79,8 +80,6 @@ test(
     } finally {
       if (sessionId) {
         await agent.closeSession({ sessionId } as any).catch(() => {})
-        // Keep the shared adapter map (~/.pi/pi-acp/session-map.json) free of test entries.
-        ;(agent as any).store?.delete?.(sessionId)
       }
       agent.dispose()
       // Real pi wrote a session file under scratch; remove it with the scratch dir.
