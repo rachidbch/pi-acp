@@ -284,13 +284,19 @@ export class PiRpcProcess {
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
   private readonly mcpInjection: McpInjectionPlan | null
+  private readonly removePromptFile: () => void
   private startupEvents: PiRpcEvent[] | null = []
   private startupEventBytes = 0
   private terminalError: Error | undefined
 
-  private constructor(child: ChildProcessWithoutNullStreams, mcpInjection: McpInjectionPlan | null) {
+  private constructor(
+    child: ChildProcessWithoutNullStreams,
+    mcpInjection: McpInjectionPlan | null,
+    removePromptFile: () => void
+  ) {
     this.child = child
     this.mcpInjection = mcpInjection
+    this.removePromptFile = removePromptFile
 
     // Without a listener, an EPIPE on stdin (e.g. pi died mid-write) crashes the whole
     // adapter with an unhandled 'error' event. The write callback still reports the
@@ -465,9 +471,10 @@ export class PiRpcProcess {
       }
     })
 
-    // The prompt file lives exactly as long as the pi child that reads it.
+    // The prompt file lives exactly as long as the pi child that reads it: removed on its
+    // close, and synchronously in dispose() because the adapter exits right after it.
     child.once('close', () => systemPrompt.dispose())
-    const proc = new PiRpcProcess(child, mcpInjection)
+    const proc = new PiRpcProcess(child, mcpInjection, systemPrompt.dispose)
 
     // Best-effort handshake.
     // Important: pi may emit a get_state response pointing at a sessionFile in a directory
@@ -519,6 +526,7 @@ export class PiRpcProcess {
 
   dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
     this.mcpInjection?.cleanup()
+    this.removePromptFile()
     this.fail(new Error('pi process disposed'))
     if (this.child.killed) return
     try {
