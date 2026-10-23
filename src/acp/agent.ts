@@ -33,7 +33,7 @@ import {
 } from '@agentclientprotocol/sdk/unstable'
 import type { AcpClient } from './connection.js'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, toToolKind, type PiAcpSession, type TurnUsage } from './session.js'
+import { SessionManager, toToolKind, type PiAcpSession, type TurnSummary, type TurnUsage } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions.js'
@@ -53,6 +53,7 @@ import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slas
 import type { McpInjectionPlan } from './mcp-descriptor.js'
 import { prepareMcpInjection } from './mcp-descriptor.js'
 import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
+import { launchCapabilities, parseLaunchOptions, type LaunchOptions } from './launch.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
@@ -158,6 +159,11 @@ export class PiAcpAgent {
   private readonly store = new SessionStore()
   private clientCapabilities: ClientCapabilities = {}
   private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
+  /**
+   * Launch options per session id, kept for the adapter's lifetime so a respawn after a
+   * pi crash relaunches with the same flags and system prompt.
+   */
+  private readonly launches = new Map<string, LaunchOptions>()
 
   /**
    * Respawn guard for on-demand recovery (codex AppServerRecovery pattern): a stored
@@ -248,8 +254,9 @@ export class PiAcpAgent {
 
   private async restoreSession(
     sessionId: string,
-    opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers'] }
+    opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers']; launch?: LaunchOptions }
   ): Promise<PiAcpSession> {
+    if (opts?.launch) this.launches.set(sessionId, opts.launch)
     const existing = this.sessions.maybeGet(sessionId)
     if (existing) return existing
 
@@ -269,11 +276,14 @@ export class PiAcpAgent {
       const mcpInjection = opts?.mcpServers?.length ? prepareMcpInjection(opts.mcpServers) : null
       let proc: PiRpcProcess
       try {
+        const launch = this.launches.get(sessionId)
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
           piCommand: process.env.PI_ACP_PI_COMMAND,
-          ...(mcpInjection ? { mcpInjection } : {})
+          ...(mcpInjection ? { mcpInjection } : {}),
+          ...(launch?.args.length ? { launchArgs: launch.args } : {}),
+          ...(launch?.systemPrompt ? { systemPrompt: launch.systemPrompt } : {})
         })
       } catch (e: any) {
         mcpInjection?.cleanup()
@@ -291,7 +301,8 @@ export class PiAcpAgent {
         proc,
         fileCommands,
         mcpInjection,
-        clientCapabilities: this.clientCapabilities
+        clientCapabilities: this.clientCapabilities,
+        ...(this.launches.has(sessionId) ? { launch: this.launches.get(sessionId) } : {})
       })
 
       try {
@@ -358,6 +369,8 @@ export class PiAcpAgent {
           fork: {}
         },
         _meta: {
+          // Per-session launch options this adapter reads from request _meta (see acp/launch.ts).
+          piAcp: launchCapabilities(),
           // UNSTABLE claude-agent-acp contract. Auth discovery can read either this
           // marker or the _auth/status_update push below; both need a complete
           // kind/label identity, since an empty marker can stall model discovery.
@@ -393,6 +406,7 @@ export class PiAcpAgent {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
     warnAdditionalDirectories('session/new', (params as { additionalDirectories?: unknown }).additionalDirectories)
+    const launch = parseLaunchOptions(params._meta)
 
     this.lastSessionCwd = params.cwd
 
@@ -406,8 +420,10 @@ export class PiAcpAgent {
       conn: this.conn,
       fileCommands,
       piCommand: process.env.PI_ACP_PI_COMMAND,
-      clientCapabilities: this.clientCapabilities
+      clientCapabilities: this.clientCapabilities,
+      launch
     })
+    this.launches.set(session.sessionId, launch)
 
     // Fetch state + models once (parallel) to reduce startup latency.
     let state: any = null
@@ -490,8 +506,9 @@ export class PiAcpAgent {
     }
     const { configOptions, models, modes } = configuration
 
-    const quietStartup = getQuietStartup(params.cwd)
-    const updateNotice = buildUpdateNotice()
+    // Headless children get no banner and no update probe (it runs `npm view`).
+    const quietStartup = launch.headless || getQuietStartup(params.cwd)
+    const updateNotice = launch.headless ? null : buildUpdateNotice()
 
     // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
     // the "New version available" notice (if any) since it's high-signal and actionable.
@@ -505,7 +522,7 @@ export class PiAcpAgent {
           updateNotice
         })
 
-    const mcpSection = buildMcpStartupSection(session.mcpInjection)
+    const mcpSection = launch.headless ? null : buildMcpStartupSection(session.mcpInjection)
     if (mcpSection) preludeText = preludeText ? `${preludeText}${mcpSection}` : mcpSection
 
     if (preludeText)
@@ -1045,7 +1062,7 @@ export class PiAcpAgent {
       }
     }
 
-    const usageOut: { usage?: TurnUsage } = {}
+    const usageOut: { usage?: TurnUsage; summary?: TurnSummary } = {}
     const result = await session.prompt(
       message,
       images,
@@ -1060,7 +1077,11 @@ export class PiAcpAgent {
     }
     const stopReason: StopReason = result === 'error' ? 'cancelled' : result
 
-    return { stopReason, ...(usageOut.usage ? { usage: usageOut.usage } : {}) }
+    return {
+      stopReason,
+      ...(usageOut.usage ? { usage: usageOut.usage } : {}),
+      ...(usageOut.summary ? { _meta: { piAcp: usageOut.summary } } : {})
+    }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -1103,6 +1124,7 @@ export class PiAcpAgent {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
     warnAdditionalDirectories('session/load', (params as { additionalDirectories?: unknown }).additionalDirectories)
+    const launch = parseLaunchOptions(params._meta)
 
     // If the client is re-loading a session that is already active, tear down the existing
     // pi subprocess so we can start fresh and re-advertise commands reliably.
@@ -1119,7 +1141,8 @@ export class PiAcpAgent {
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
     const session = await this.restoreSession(params.sessionId, {
       cwd: params.cwd,
-      mcpServers: params.mcpServers
+      mcpServers: params.mcpServers,
+      launch
     })
     const proc = session.proc
     let configuration: Awaited<ReturnType<typeof getSessionConfiguration>>
@@ -1373,10 +1396,12 @@ export class PiAcpAgent {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
 
+    const launch = parseLaunchOptions(params._meta)
     const existing = this.sessions.maybeGet(params.sessionId)
     const session = await this.restoreSession(params.sessionId, {
       cwd: params.cwd,
-      mcpServers: params.mcpServers ?? []
+      mcpServers: params.mcpServers ?? [],
+      launch
     })
     // A live process cannot change its workspace or injected MCP descriptors.
     if (session.cwd !== params.cwd || !isDeepStrictEqual(session.mcpServers, params.mcpServers ?? [])) {

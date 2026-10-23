@@ -38,6 +38,7 @@ import {
 import { toolResultToContent } from './translate/pi-tools.js'
 import { handleExtensionUiRequest as translateExtensionUiRequest } from './extension-ui.js'
 import { MessageIds, messageKey } from './translate/message-id.js'
+import type { LaunchOptions } from './launch.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -46,6 +47,8 @@ type SessionCreateParams = {
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
   clientCapabilities?: ClientCapabilities
+  /** Launch flags, system prompt and headless mode from the request `_meta`. */
+  launch?: LaunchOptions
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error' | 'max_tokens'
@@ -64,6 +67,7 @@ type PendingTurn = {
   /** Context-token snapshot taken when the turn started (null on stats failure). */
   preStats: Promise<PiSessionStats | null>
   completing?: boolean
+  summary: TurnSummary
 }
 
 type QueuedTurn = {
@@ -72,8 +76,8 @@ type QueuedTurn = {
   title?: string
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
-  /** Filled with derived per-turn usage (when computable) before the turn resolves. */
-  usageOut?: { usage?: TurnUsage }
+  /** Filled with derived per-turn usage (when computable) and the turn summary before the turn resolves. */
+  usageOut?: { usage?: TurnUsage; summary?: TurnSummary }
 }
 
 /**
@@ -92,6 +96,40 @@ function toUsageUpdate(stats: PiSessionStats | null | undefined): SessionUpdate 
 }
 
 export type TurnUsage = { totalTokens: number; inputTokens: number; outputTokens: number }
+
+/**
+ * `PromptResponse._meta.piAcp`: what happened in one ACP turn, summed from pi events.
+ * `usage` adds up every assistant `message_end` usage of the turn (retries included).
+ */
+export type TurnSummary = {
+  stopReason?: StopReason
+  aborted: boolean
+  errorMessage?: string
+  retries: number
+  compactions: number
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }
+}
+
+function emptySummary(): TurnSummary {
+  return {
+    aborted: false,
+    retries: 0,
+    compactions: 0,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
+  }
+}
+
+function addMessageUsage(summary: TurnSummary, usage: unknown): void {
+  if (typeof usage !== 'object' || usage === null) return
+  const u = usage as Record<string, unknown>
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+  summary.usage.input += num(u.input)
+  summary.usage.output += num(u.output)
+  summary.usage.cacheRead += num(u.cacheRead)
+  summary.usage.cacheWrite += num(u.cacheWrite)
+  const cost = u.cost
+  summary.usage.cost += num(typeof cost === 'object' && cost !== null ? (cost as Record<string, unknown>).total : cost)
+}
 
 function contextTokens(stats: PiSessionStats | null | undefined): number | null {
   const tokens = stats?.contextUsage?.tokens
@@ -266,7 +304,9 @@ export class SessionManager {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
         piCommand: params.piCommand,
-        ...(mcpInjection ? { mcpInjection } : {})
+        ...(mcpInjection ? { mcpInjection } : {}),
+        ...(params.launch?.args.length ? { launchArgs: params.launch.args } : {}),
+        ...(params.launch?.systemPrompt ? { systemPrompt: params.launch.systemPrompt } : {})
       })
     } catch (e) {
       mcpInjection?.cleanup()
@@ -299,7 +339,8 @@ export class SessionManager {
       fileCommands: params.fileCommands ?? [],
       autoTitle: true,
       mcpInjection,
-      clientCapabilities: params.clientCapabilities
+      clientCapabilities: params.clientCapabilities,
+      headless: params.launch?.headless === true
     })
 
     this.sessions.set(sessionId, session)
@@ -332,7 +373,8 @@ export class SessionManager {
       fileCommands: params.fileCommands ?? [],
       autoTitle: false,
       mcpInjection: params.mcpInjection,
-      clientCapabilities: params.clientCapabilities
+      clientCapabilities: params.clientCapabilities,
+      headless: params.launch?.headless === true
     })
 
     this.sessions.set(sessionId, session)
@@ -346,6 +388,8 @@ export class PiAcpSession {
   readonly mcpServers: McpServer[]
   readonly mcpInjection: McpInjectionPlan | null
   private readonly clientCapabilities: ClientCapabilities
+  /** `_meta.piAcp.headless`: no banner or queue chatter; notices go out as `_meta`. */
+  readonly headless: boolean
 
   private startupInfo: string | null = null
   private startupInfoSent = false
@@ -410,6 +454,7 @@ export class PiAcpSession {
     autoTitle?: boolean
     mcpInjection?: McpInjectionPlan | null
     clientCapabilities?: ClientCapabilities
+    headless?: boolean
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -420,6 +465,7 @@ export class PiAcpSession {
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
     this.initialTitlePending = opts.autoTitle ?? false
+    this.headless = opts.headless === true
 
     this.unsubscribe = this.proc.onEvent(ev => {
       if (!this.disposed) this.handlePiEvent(ev)
@@ -519,6 +565,7 @@ export class PiAcpSession {
   }
 
   setStartupInfo(text: string) {
+    if (this.headless) return
     this.startupInfo = text
     this.startupInfoSent = false
   }
@@ -543,7 +590,7 @@ export class PiAcpSession {
     images: unknown[] = [],
     title?: string,
     signal?: AbortSignal,
-    usageOut?: { usage?: TurnUsage }
+    usageOut?: { usage?: TurnUsage; summary?: TurnSummary }
   ): Promise<StopReason> {
     if (this.disposed || signal?.aborted) return 'cancelled'
     // pi RPC mode disables slash command expansion, so we do it here.
@@ -578,13 +625,14 @@ export class PiAcpSession {
 
         // Best-effort: notify client that a prompt was queued.
         // This doesn't work in Zed yet, needs to be revisited
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: {
-            type: 'text',
-            text: `Queued message (position ${this.turnQueue.length}).`
-          }
-        })
+        if (!this.headless)
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: `Queued message (position ${this.turnQueue.length}).`
+            }
+          })
 
         // Also publish queue depth via session info metadata.
         // This also not visible in the client
@@ -617,10 +665,11 @@ export class PiAcpSession {
       const queued = this.turnQueue.splice(0, this.turnQueue.length)
       for (const t of queued) t.resolve('cancelled')
 
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Cleared queued prompts.' }
-      })
+      if (!this.headless)
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Cleared queued prompts.' }
+        })
       this.emit({
         sessionUpdate: 'session_info_update',
         _meta: { piAcp: { queueDepth: 0, running: Boolean(this.pendingTurn) } }
@@ -745,6 +794,11 @@ export class PiAcpSession {
     const postStats = await this.publishContextUsage()
     if (this.pendingTurn !== turn) return
     this.pendingTurn = null
+    if (turn.queued.usageOut) {
+      const stopReason: StopReason =
+        this.cancelRequested || turn.outcome === 'cancelled' ? 'cancelled' : (turn.outcome ?? 'end_turn')
+      turn.queued.usageOut.summary = { ...turn.summary, stopReason }
+    }
     if (this.cancelRequested || turn.outcome === 'cancelled') turn.resolve('cancelled')
     else if (turn.outcome === 'error') {
       const error = new Error(turn.errorMessage || 'Pi provider failed')
@@ -774,10 +828,11 @@ export class PiAcpSession {
     if (this.isExecutionBusy()) return
     const next = this.turnQueue.shift()
     if (next) {
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
-      })
+      if (!this.headless)
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+        })
       this.startTurn(next)
     } else {
       this.emit({
@@ -863,7 +918,8 @@ export class PiAcpSession {
       title: t.title,
       resolve: t.resolve,
       reject: t.reject,
-      preStats: Promise.resolve(null)
+      preStats: Promise.resolve(null),
+      summary: emptySummary()
     }
     this.pendingTurn = turn
     // Snapshot context tokens at turn start so per-turn usage can be derived at completion.
@@ -962,11 +1018,14 @@ export class PiAcpSession {
   }
 
   private emitNotice(title: string, severity: 'info' | 'warning' | 'error' = 'info'): void {
-    this.emit(
-      this.clientCapabilities.session?.notices != null
-        ? { sessionUpdate: 'notice', title, severity }
-        : { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: title } }
-    )
+    if (this.clientCapabilities.session?.notices != null) {
+      this.emit({ sessionUpdate: 'notice', title, severity })
+    } else if (this.headless) {
+      // Keep the message stream to model output only.
+      this.emit({ sessionUpdate: 'session_info_update', _meta: { piAcp: { notice: { title, severity } } } })
+    } else {
+      this.emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: title } })
+    }
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
@@ -989,6 +1048,9 @@ export class PiAcpSession {
         const message =
           typeof ev.message === 'object' && ev.message !== null ? (ev.message as Record<string, unknown>) : undefined
         if (message?.role === 'assistant' && this.pendingTurn) {
+          addMessageUsage(this.pendingTurn.summary, message.usage)
+          if (message.stopReason === 'error' && typeof message.errorMessage === 'string')
+            this.pendingTurn.summary.errorMessage = message.errorMessage
           this.pendingTurn.outcome =
             message.stopReason === 'error'
               ? 'error'
@@ -1292,6 +1354,7 @@ export class PiAcpSession {
       }
 
       case 'auto_retry_start': {
+        if (this.pendingTurn) this.pendingTurn.summary.retries++
         this.emitNotice(formatAutoRetryMessage(ev))
         break
       }
@@ -1322,6 +1385,7 @@ export class PiAcpSession {
 
       case 'compaction_end':
       case 'auto_compaction_end': {
+        if (this.pendingTurn && ev.aborted !== true) this.pendingTurn.summary.compactions++
         this.compactionVersion++
         this.compactionCancelled = ev.aborted === true
         if (this.clientCapabilities.session?.compaction != null) {
@@ -1366,6 +1430,7 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
+        if (this.pendingTurn && ev.aborted === true) this.pendingTurn.summary.aborted = true
         void this.settleTurn()
         break
       }

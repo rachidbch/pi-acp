@@ -2,6 +2,8 @@ import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'n
 import { existsSync } from 'node:fs'
 import crossSpawn from 'cross-spawn'
 import { z } from 'zod'
+import { prepareSystemPrompt } from './system-prompt.js'
+import type { SystemPrompt } from '../acp/launch.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 import { PI_ACP_MCP_DESCRIPTOR_ENV, type McpInjectionPlan } from '../acp/mcp-descriptor.js'
 import { fileURLToPath } from 'node:url'
@@ -126,6 +128,10 @@ type SpawnParams = {
   forkSessionPath?: string
   /** Client-provided MCP servers to inject into pi (see acp/mcp-descriptor.ts). */
   mcpInjection?: McpInjectionPlan
+  /** Allowlisted pi flags from `_meta.piAcp.launch` (see acp/launch.ts). */
+  launchArgs?: string[]
+  /** System prompt from `_meta.systemPrompt`, passed to pi through a private temp file. */
+  systemPrompt?: SystemPrompt
 }
 
 const MIN_PI_VERSION_FOR_MCP_INJECTION = '1.0.0'
@@ -390,7 +396,8 @@ export class PiRpcProcess {
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
-    const args = ['--mode', 'rpc', '--no-themes']
+    const systemPrompt = prepareSystemPrompt(params.systemPrompt)
+    const args = ['--mode', 'rpc', '--no-themes', ...(params.launchArgs ?? []), ...systemPrompt.args]
     if (mcpBootstrapPath) args.push('-e', mcpBootstrapPath)
     if (params.sessionPath) args.push('--session', params.sessionPath)
     if (params.forkSessionPath) args.push('--fork', params.forkSessionPath)
@@ -429,6 +436,7 @@ export class PiRpcProcess {
       })
     } catch (e: any) {
       mcpInjection?.cleanup()
+      systemPrompt.dispose()
       const code = typeof e?.code === 'string' ? e.code : undefined
       if (code === 'ENOENT') {
         throw new PiRpcSpawnError(
@@ -457,6 +465,8 @@ export class PiRpcProcess {
       }
     })
 
+    // The prompt file lives exactly as long as the pi child that reads it.
+    child.once('close', () => systemPrompt.dispose())
     const proc = new PiRpcProcess(child, mcpInjection)
 
     // Best-effort handshake.
