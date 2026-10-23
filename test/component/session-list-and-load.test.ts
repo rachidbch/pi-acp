@@ -13,8 +13,8 @@ import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history', async () => {
   // Create a fake PI_CODING_AGENT_DIR with one session.
   const root = mkdtempSync(join(tmpdir(), 'pi-acp-test-'))
-  const sessionsDir = join(root, 'sessions', '--tmp--project--')
-  const sessionFile = join(sessionsDir, '0000_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl')
+  const sessionsDir = join(root, 'sessions', '--tmp-project--')
+  const sessionFile = join(sessionsDir, '0000_sess-1.jsonl')
 
   // Ensure parent dirs.
   mkdirSync(sessionsDir, { recursive: true })
@@ -76,7 +76,7 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
     ;(PiRpcProcess as any).spawn = async (params: any) => {
       // ensure loadSession resolves to some jsonl that ends with our expected filename
       assert.ok(typeof params.sessionPath === 'string')
-      assert.ok(params.sessionPath.endsWith('/0000_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl'))
+      assert.ok(params.sessionPath.endsWith('/0000_sess-1.jsonl'))
 
       return {
         onEvent: () => () => {

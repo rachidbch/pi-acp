@@ -20,9 +20,9 @@ function stubProc(): unknown {
 }
 
 function writeStoredSession(root: string, sessionId: string): void {
-  const sessionsDir = join(root, 'sessions', '--tmp--project--')
+  const sessionsDir = join(root, 'sessions', '--tmp-project--')
   mkdirSync(sessionsDir, { recursive: true })
-  const sessionFile = join(sessionsDir, `${sessionId}.jsonl`)
+  const sessionFile = join(sessionsDir, `2026-02-11T00-00-00-000Z_${sessionId}.jsonl`)
   writeFileSync(
     sessionFile,
     `${JSON.stringify({

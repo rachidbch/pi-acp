@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +16,7 @@ const argvFile = join(scratch, 'argv.json')
 // The adapter store lives under HOME; keep it out of the real one.
 process.env.HOME = scratch
 process.env.PI_ACP_PI_COMMAND = fakePi
+process.env.PI_CODING_AGENT_SESSION_DIR = join(scratch, 'sessions')
 process.env.FAKE_PI_ARGV_FILE = argvFile
 
 const readArgv = (): string[] => JSON.parse(readFileSync(argvFile, 'utf8')).argv
@@ -71,6 +72,9 @@ test('resume and a crash-style restore relaunch pi with the same flags', async (
   const meta = { piAcp: { launch: LAUNCH }, systemPrompt: 'REPLACED' }
   const { sessionId } = await agent.newSession({ cwd: scratch, mcpServers: [], _meta: meta } as any)
   await agent.closeSession({ sessionId } as any)
+  // The fake pi writes no session file; resume finds one by id + cwd in the session dir.
+  mkdirSync(join(scratch, 'sessions'), { recursive: true })
+  writeFileSync(join(scratch, 'sessions', `2026-01-01T00-00-00-000Z_${sessionId}.jsonl`), '')
 
   await agent.resumeSession({ sessionId, cwd: scratch, mcpServers: [], _meta: meta } as any)
   let argv = readArgv()

@@ -37,9 +37,46 @@ function readSessionDirFromSettings(agentDir: string): string | null {
   }
 }
 
+function expandTilde(path: string): string {
+  return path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path
+}
+
+/** pi's own order (`main.js`): env first, then settings.json `sessionDir`. A set value is one flat directory. */
+function getConfiguredSessionDir(agentDir: string): string | null {
+  const fromEnv = process.env.PI_CODING_AGENT_SESSION_DIR
+  return fromEnv ? resolve(expandTilde(fromEnv)) : readSessionDirFromSettings(agentDir)
+}
+
 export function getPiSessionsDir(): string {
   const agentDir = getPiAgentDir()
-  return readSessionDirFromSettings(agentDir) ?? join(agentDir, 'sessions')
+  return getConfiguredSessionDir(agentDir) ?? join(agentDir, 'sessions')
+}
+
+/**
+ * The one directory pi writes a cwd's sessions to (`session-manager.js` getDefaultSessionDirPath):
+ * the configured directory flat, else `<agentDir>/sessions/--<cwd with separators as ->--`.
+ */
+export function getPiSessionDirForCwd(cwd: string): string {
+  const agentDir = getPiAgentDir()
+  const configured = getConfiguredSessionDir(agentDir)
+  if (configured) return configured
+  return join(
+    agentDir,
+    'sessions',
+    `--${resolve(cwd)
+      .replace(/^[/\\]/, '')
+      .replace(/[/\\:]/g, '-')}--`
+  )
+}
+
+/** pi names session files `<timestamp>_<id>.jsonl`; reads one directory, never scans. */
+export function findPiSessionFile(dir: string, sessionId: string): string | null {
+  try {
+    const name = readdirSync(dir).find(f => f.endsWith(`_${sessionId}.jsonl`))
+    return name ? join(dir, name) : null
+  } catch {
+    return null
+  }
 }
 
 function walkJsonlFiles(dir: string, out: string[]) {
@@ -329,13 +366,4 @@ export function listPiSessions(): PiSessionListItem[] {
   })
 
   return items
-}
-
-export function findPiSession(sessionId: string): PiSessionListItem | null {
-  const all = listPiSessions()
-  return all.find(s => s.sessionId === sessionId) ?? null
-}
-
-export function findPiSessionFile(sessionId: string): string | null {
-  return findPiSession(sessionId)?.sessionFile ?? null
 }

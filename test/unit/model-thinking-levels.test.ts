@@ -1,13 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager } from '../../src/acp/session.js'
-import { SessionStore } from '../../src/acp/session-store.js'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
+import { writePiSession } from '../helpers/session-files.js'
 
 function fixture() {
   const conn = new FakeAgentSideConnection()
@@ -172,10 +172,12 @@ for (const load of [false, true]) {
       proc.getAvailableThinkingLevels = async () => levels
       t.mock.method(globalThis, 'setTimeout', () => 0 as unknown as ReturnType<typeof setTimeout>)
       t.mock.method(PiRpcProcess, 'spawn', async () => proc as unknown as PiRpcProcess)
-      Reflect.set(agent, 'store', {
-        get: () => ({ cwd: process.cwd(), sessionFile: '/tmp/thinking-test.jsonl' }),
-        upsert() {},
-        delete() {}
+      const sessionDir = mkdtempSync(join(tmpdir(), 'pi-acp-thinking-'))
+      writePiSession(sessionDir, 's1', process.cwd())
+      process.env.PI_CODING_AGENT_SESSION_DIR = sessionDir
+      t.after(() => {
+        delete process.env.PI_CODING_AGENT_SESSION_DIR
+        rmSync(sessionDir, { recursive: true, force: true })
       })
       const result = load
         ? await agent.loadSession({ sessionId: 's1', cwd: process.cwd(), mcpServers: [] })
@@ -200,14 +202,13 @@ for (const failure of ['discovery', 'missing-current', 'inconsistent-current', '
     const root = mkdtempSync(join(tmpdir(), 'pi-acp-load-thinking-'))
     t.after(() => rmSync(root, { recursive: true, force: true }))
     t.mock.method(globalThis, 'setTimeout', () => 0 as unknown as ReturnType<typeof setTimeout>)
-    const sessionFile = join(root, 'history.jsonl')
-    writeFileSync(sessionFile, 'persisted history\n')
-    const store = new SessionStore(join(root, 'map.json'))
-    store.upsert({ sessionId: 's1', cwd: root, sessionFile })
+    process.env.PI_CODING_AGENT_SESSION_DIR = root
+    t.after(() => delete process.env.PI_CODING_AGENT_SESSION_DIR)
+    const sessionFile = writePiSession(root, 's1', root)
+    const history = readFileSync(sessionFile, 'utf8')
     const { agent, conn, proc } = fixture()
     const sessions = new SessionManager()
     Reflect.set(agent, 'sessions', sessions)
-    Reflect.set(agent, 'store', store)
     let existingDisposed = 0
     let restoredDisposed = 0
     let historyReads = 0
@@ -255,8 +256,7 @@ for (const failure of ['discovery', 'missing-current', 'inconsistent-current', '
     assert.equal(existingDisposed, 0)
     assert.equal(historyReads, 0)
     assert.equal(conn.updates.length, 0)
-    assert.equal(readFileSync(sessionFile, 'utf8'), 'persisted history\n')
-    assert.equal(store.get('s1')?.sessionFile, sessionFile)
+    assert.equal(readFileSync(sessionFile, 'utf8'), history)
     shouldFail = false
     const result = await agent.loadSession({ sessionId: 's1', cwd: root, mcpServers: [] })
     assert.equal(result.modes?.currentModeId, 'max')
@@ -264,6 +264,6 @@ for (const failure of ['discovery', 'missing-current', 'inconsistent-current', '
     assert.equal(restoredDisposed, 1)
     assert.equal(historyReads, 1)
     assert.ok(conn.updates.some(update => update.update.sessionUpdate === 'user_message_chunk'))
-    assert.equal(readFileSync(sessionFile, 'utf8'), 'persisted history\n')
+    assert.equal(readFileSync(sessionFile, 'utf8'), history)
   })
 }

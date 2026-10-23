@@ -1,13 +1,13 @@
 import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PROTOCOL_VERSION, RequestError, type McpServer } from '@agentclientprotocol/sdk/unstable'
 import { PiAcpAgent } from '../../src/acp/agent.js'
-import { SessionStore } from '../../src/acp/session-store.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
+import { writePiSession } from '../helpers/session-files.js'
 
 class LifecycleProcess extends FakePiRpcProcess {
   failConfiguration = false
@@ -40,15 +40,12 @@ class LifecycleProcess extends FakePiRpcProcess {
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'pi-acp-lifecycle-'))
-  const previousAgentDir = process.env.PI_CODING_AGENT_DIR
-  process.env.PI_CODING_AGENT_DIR = root
-  const file = join(root, 'session.jsonl')
-  writeFileSync(file, JSON.stringify({ type: 'session', id: 'lifecycle', cwd: root }) + '\n')
-  const store = new SessionStore(join(root, 'map.json'))
-  store.upsert({ sessionId: 'lifecycle', cwd: root, sessionFile: file })
+  const previousSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR
+  process.env.PI_CODING_AGENT_SESSION_DIR = root
+  const file = writePiSession(root, 'lifecycle', root)
   const conn = new FakeAgentSideConnection()
   const agent = new PiAcpAgent(asAgentConn(conn))
-  Object.defineProperty(agent, 'store', { value: store })
+  const cwds = Reflect.get(agent, 'cwds') as Map<string, string>
   const processes: LifecycleProcess[] = []
   const calls: Parameters<typeof PiRpcProcess.spawn>[0][] = []
   const spawn = t.mock.method(PiRpcProcess, 'spawn', async (opts: Parameters<typeof PiRpcProcess.spawn>[0]) => {
@@ -61,10 +58,10 @@ function fixture(t: TestContext) {
     agent.dispose()
     spawn.mock.restore()
     rmSync(root, { recursive: true, force: true })
-    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
-    else process.env.PI_CODING_AGENT_DIR = previousAgentDir
+    if (previousSessionDir === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR
+    else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessionDir
   })
-  return { root, file, store, conn, agent, processes, calls }
+  return { root, file, cwds, conn, agent, processes, calls }
 }
 
 test('lifecycle capabilities advertise resume and close', async t => {
@@ -75,7 +72,7 @@ test('lifecycle capabilities advertise resume and close', async t => {
 })
 
 test('resume restores with requested cwd/MCP and configuration without history or startup notifications', async t => {
-  const { agent, root, file, store, calls, processes, conn } = fixture(t)
+  const { agent, root, file, cwds, calls, processes, conn } = fixture(t)
   const cwd = join(root, 'other')
   mkdirSync(cwd)
   const mcpServers: McpServer[] = [{ name: 'test-server', command: 'echo', args: [], env: [] }]
@@ -85,7 +82,7 @@ test('resume restores with requested cwd/MCP and configuration without history o
   assert.equal(calls[0]?.cwd, cwd)
   assert.equal(calls[0]?.sessionPath, file)
   assert.deepEqual(calls[0]?.mcpInjection?.serverNames, ['test-server'])
-  assert.equal(store.get('lifecycle')?.cwd, cwd)
+  assert.equal(cwds.get('lifecycle'), cwd)
   assert.equal(processes[0]?.historyReads, 1)
   assert.deepEqual(conn.updates, [])
   assert.equal('models' in response, false)
@@ -119,13 +116,13 @@ test('resume validates cwd and unknown IDs without spawning', async t => {
 })
 
 test('failed resume configuration closes only a newly restored process and preserves persistence', async t => {
-  const { agent, root, file, processes, store } = fixture(t)
+  const { agent, root, file, processes, cwds } = fixture(t)
   const first = agent.resumeSession({ sessionId: 'lifecycle', cwd: root })
   processes[0]!.failConfiguration = true
   await assert.rejects(first, /configuration failed/)
   assert.equal(processes[0]?.disposeCount, 1)
   assert.equal(existsSync(file), true)
-  assert.ok(store.get('lifecycle'))
+  assert.ok(cwds.get('lifecycle'))
   await agent.resumeSession({ sessionId: 'lifecycle', cwd: root })
   processes[1]!.failConfiguration = true
   await assert.rejects(agent.resumeSession({ sessionId: 'lifecycle', cwd: root }), /configuration failed/)
@@ -136,7 +133,7 @@ test(
   'close cancels active and queued turns without waiting for a hung abort, and retains history',
   { timeout: 2000 },
   async t => {
-    const { agent, root, file, store, processes, calls } = fixture(t)
+    const { agent, root, file, cwds, processes, calls } = fixture(t)
     await agent.resumeSession({ sessionId: 'lifecycle', cwd: root })
     const first = agent.prompt({ sessionId: 'lifecycle', prompt: [{ type: 'text', text: 'first' }] })
     const queued = agent.prompt({ sessionId: 'lifecycle', prompt: [{ type: 'text', text: 'queued' }] })
@@ -144,7 +141,7 @@ test(
     assert.equal((await first).stopReason, 'cancelled')
     assert.equal((await queued).stopReason, 'cancelled')
     assert.equal(processes[0]?.disposeCount, 1)
-    assert.ok(store.get('lifecycle'))
+    assert.ok(cwds.get('lifecycle'))
     assert.equal(existsSync(file), true)
     await agent.closeSession({ sessionId: 'lifecycle' })
     await agent.closeSession({ sessionId: 'unknown-lifecycle' })
@@ -158,28 +155,28 @@ test(
   'delete disposes before unlinking persistence without waiting for a hung abort and is idempotent',
   { timeout: 2000 },
   async t => {
-    const { agent, root, file, store, processes } = fixture(t)
+    const { agent, root, file, cwds, processes } = fixture(t)
     await agent.resumeSession({ sessionId: 'lifecycle', cwd: root })
     assert.deepEqual(await agent.deleteSession({ sessionId: 'lifecycle' }), {})
     assert.equal(processes[0]?.disposeCount, 1)
     assert.equal(processes[0]?.fileAtDispose, true)
     assert.equal(existsSync(file), false)
-    assert.equal(store.get('lifecycle'), null)
+    assert.equal(cwds.has('lifecycle'), false)
     assert.deepEqual(await agent.deleteSession({ sessionId: 'lifecycle' }), {})
   }
 )
 
 test('delete reports unlink failure and keeps mapping for retry after closing process', async t => {
-  const { agent, root, file, store, processes } = fixture(t)
+  const { agent, root, file, cwds, processes } = fixture(t)
   await agent.resumeSession({ sessionId: 'lifecycle', cwd: root })
   rmSync(file)
   mkdirSync(file)
   await assert.rejects(agent.deleteSession({ sessionId: 'lifecycle' }), /Failed to delete session/)
   assert.equal(processes[0]?.disposeCount, 1)
-  assert.ok(store.get('lifecycle'))
+  assert.ok(cwds.get('lifecycle'))
   rmSync(file, { recursive: true })
   assert.deepEqual(await agent.deleteSession({ sessionId: 'lifecycle' }), {})
-  assert.equal(store.get('lifecycle'), null)
+  assert.equal(cwds.has('lifecycle'), false)
 })
 
 test('load replays message IDs, thoughts, and failed tool status consistently', async t => {

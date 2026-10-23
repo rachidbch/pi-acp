@@ -1,11 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
+import { piSessionDir, writePiSession } from '../helpers/session-files.js'
 
 class FakeSessions {
   restoredSession: any = null
@@ -24,11 +25,18 @@ class FakeSessions {
   }
 }
 
-test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', async () => {
+test('PiAcpAgent: prompt auto-restores a closed session from its known cwd', async t => {
   const conn = new FakeAgentSideConnection()
+  const root = mkdtempSync(join(tmpdir(), 'pi-acp-restore-known-'))
+  const sessionFile = writePiSession(piSessionDir(root, '/tmp/store-project'), 'stored-session', '/tmp/store-project')
+  const prevAgentDir = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = root
+  t.after(() => {
+    if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = prevAgentDir
+  })
   const promptCalls: Array<{ message: string; images: unknown[] }> = []
   const spawnCalls: any[] = []
-  const storeUpserts: any[] = []
 
   const sessions = new FakeSessions((sessionId, params) => ({
     sessionId,
@@ -55,20 +63,7 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
   try {
     const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
     ;(agent as any).sessions = sessions as any
-    ;(agent as any).store = {
-      get(sessionId: string) {
-        if (sessionId !== 'stored-session') return null
-        return {
-          sessionId,
-          cwd: '/tmp/store-project',
-          sessionFile: '/tmp/store-project/session.jsonl',
-          updatedAt: new Date().toISOString()
-        }
-      },
-      upsert(entry: any) {
-        storeUpserts.push(entry)
-      }
-    }
+    ;(agent as any).cwds.set('stored-session', '/tmp/store-project')
 
     const result = await agent.prompt({
       sessionId: 'stored-session',
@@ -79,46 +74,28 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
     assert.deepEqual(spawnCalls, [
       {
         cwd: '/tmp/store-project',
-        sessionPath: '/tmp/store-project/session.jsonl',
+        sessionPath: sessionFile,
         piCommand: process.env.PI_ACP_PI_COMMAND
       }
     ])
     assert.deepEqual(promptCalls, [{ message: 'hello again', images: [] }])
-    assert.deepEqual(storeUpserts, [
-      {
-        sessionId: 'stored-session',
-        cwd: '/tmp/store-project',
-        sessionFile: '/tmp/store-project/session.jsonl'
-      }
-    ])
   } finally {
     PiRpcProcess.spawn = originalSpawn
   }
 })
 
-test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery when SessionStore misses', async () => {
+test('PiAcpAgent: setSessionConfigOption auto-restores a closed session from its known cwd', async () => {
   const conn = new FakeAgentSideConnection()
   const root = mkdtempSync(join(tmpdir(), 'pi-acp-restore-fallback-'))
-  const sessionsDir = join(root, 'sessions', '--tmp--fallback-project--')
-  const sessionFile = join(sessionsDir, '0000_restore_fallback.jsonl')
-  const prevAgentDir = process.env.PI_CODING_AGENT_DIR
-
-  mkdirSync(sessionsDir, { recursive: true })
-  writeFileSync(
-    sessionFile,
-    JSON.stringify({
-      type: 'session',
-      version: 3,
-      id: 'fallback-session',
-      timestamp: '2026-06-16T00:00:00.000Z',
-      cwd: '/tmp/fallback-project'
-    }) + '\n',
-    'utf-8'
+  const sessionFile = writePiSession(
+    piSessionDir(root, '/tmp/fallback-project'),
+    'fallback-session',
+    '/tmp/fallback-project'
   )
+  const prevAgentDir = process.env.PI_CODING_AGENT_DIR
 
   process.env.PI_CODING_AGENT_DIR = root
 
-  const storeUpserts: any[] = []
   const setModelCalls: Array<{ provider: string; modelId: string }> = []
   const spawnCalls: any[] = []
   const state = {
@@ -158,14 +135,7 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
   try {
     const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
     ;(agent as any).sessions = sessions as any
-    ;(agent as any).store = {
-      get() {
-        return null
-      },
-      upsert(entry: any) {
-        storeUpserts.push(entry)
-      }
-    }
+    ;(agent as any).cwds.set('fallback-session', '/tmp/fallback-project')
 
     const result = await agent.setSessionConfigOption({
       sessionId: 'fallback-session',
@@ -182,18 +152,6 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
     ])
     assert.deepEqual(setModelCalls, [{ provider: 'test', modelId: 'beta' }])
     assert.equal(result.configOptions.find(option => option.id === 'model')?.currentValue, 'test/beta')
-    assert.deepEqual(storeUpserts, [
-      {
-        sessionId: 'fallback-session',
-        cwd: '/tmp/fallback-project',
-        sessionFile
-      },
-      {
-        sessionId: 'fallback-session',
-        cwd: '/tmp/fallback-project',
-        sessionFile
-      }
-    ])
     assert.deepEqual(conn.updates, [
       { sessionId: 'fallback-session', update: { sessionUpdate: 'current_mode_update', currentModeId: 'medium' } },
       {

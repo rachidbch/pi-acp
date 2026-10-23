@@ -22,7 +22,6 @@ import {
 } from '../pi-rpc/process.js'
 import { prepareMcpInjection, type McpInjectionPlan } from './mcp-descriptor.js'
 import { maybeAuthRequiredError } from './auth-required.js'
-import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
   bashCommand,
@@ -254,7 +253,6 @@ function keepaliveIntervalMs(): number {
 
 export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
-  private readonly store = new SessionStore()
 
   /** Dispose all sessions and their underlying pi subprocesses. */
   disposeAll(): void {
@@ -324,12 +322,6 @@ export class SessionManager {
     }
 
     const sessionId = typeof state?.sessionId === 'string' ? state.sessionId : crypto.randomUUID()
-    const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
-
-    if (sessionFile) {
-      this.store.upsert({ sessionId, cwd: params.cwd, sessionFile })
-    }
-
     const session = new PiAcpSession({
       sessionId,
       cwd: params.cwd,

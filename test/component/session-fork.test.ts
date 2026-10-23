@@ -1,12 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
-import { SessionStore } from '../../src/acp/session-store.js'
+import { piSessionDir, writePiSession } from '../helpers/session-files.js'
 
 function stubProc(overrides: Record<string, unknown> = {}): unknown {
   return {
@@ -20,10 +20,9 @@ function stubProc(overrides: Record<string, unknown> = {}): unknown {
   }
 }
 
-test('session/fork spawns pi with --fork of the stored session file', { timeout: 5000 }, async t => {
+test('session/fork spawns pi with --fork of the session file found by id + cwd', { timeout: 5000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'pi-acp-fork-'))
-  const sourceFile = join(root, 'source.jsonl')
-  writeFileSync(sourceFile, `${JSON.stringify({ type: 'session', id: 'source', cwd: root })}\n`)
+  const sourceFile = writePiSession(piSessionDir(root, root), 'source', root)
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR
   process.env.PI_CODING_AGENT_DIR = root
   const originalSpawn = PiRpcProcess.spawn
@@ -40,14 +39,6 @@ test('session/fork spawns pi with --fork of the stored session file', { timeout:
 
   const conn = new FakeAgentSideConnection()
   const agent = new PiAcpAgent(asAgentConn(conn))
-  Object.defineProperty(agent, 'store', {
-    value: new SessionStore(join(root, 'map.json'))
-  })
-  ;(agent as unknown as { store: SessionStore }).store.upsert({
-    sessionId: 'source',
-    cwd: root,
-    sessionFile: sourceFile
-  })
 
   const response = await agent.forkSession({
     sessionId: 'source',

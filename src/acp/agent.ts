@@ -34,9 +34,8 @@ import {
 import type { AcpClient } from './connection.js'
 import { getAuthMethods } from './auth.js'
 import { SessionManager, toToolKind, type PiAcpSession, type TurnSummary, type TurnUsage } from './session.js'
-import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
-import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions.js'
+import { listPiSessions, getPiSessionDirForCwd, findPiSessionFile, readPiSessionTitle } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText, normalizePiThoughtText } from './translate/pi-messages.js'
 import {
   bashCommand,
@@ -156,7 +155,8 @@ function respawnEnvInt(name: string, fallback: number): number {
 export class PiAcpAgent {
   private readonly conn: AcpClient
   private readonly sessions = new SessionManager()
-  private readonly store = new SessionStore()
+  /** cwd per session id, kept for the adapter's lifetime: pi's session file is derived from id + cwd. */
+  private readonly cwds = new Map<string, string>()
   private clientCapabilities: ClientCapabilities = {}
   private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
   /**
@@ -218,7 +218,7 @@ export class PiAcpAgent {
     const sessionFile =
       typeof state?.sessionFile === 'string' && state.sessionFile.trim()
         ? state.sessionFile
-        : this.store.get(sessionId)?.sessionFile
+        : this.locateSessionFile(sessionId, this.cwds.get(sessionId))
 
     if (typeof sessionFile === 'string' && sessionFile.trim()) {
       try {
@@ -228,28 +228,19 @@ export class PiAcpAgent {
       }
     }
 
-    this.store.delete(sessionId)
+    this.cwds.delete(sessionId)
   }
 
-  private findStoredSession(sessionId: string): { cwd: string; sessionFile: string } | null {
-    const stored = this.store.get(sessionId)
-    if (stored?.cwd && stored?.sessionFile) {
-      return { cwd: stored.cwd, sessionFile: stored.sessionFile }
-    }
+  private locateSessionFile(sessionId: string, cwd: string | undefined): string | null {
+    return cwd ? findPiSessionFile(getPiSessionDirForCwd(cwd), sessionId) : null
+  }
 
-    const piSession = findPiSession(sessionId)
-    if (!piSession) return null
-
-    this.store.upsert({
-      sessionId,
-      cwd: piSession.cwd,
-      sessionFile: piSession.sessionFile
-    })
-
-    return {
-      cwd: piSession.cwd,
-      sessionFile: piSession.sessionFile
-    }
+  /** The session's file, or an error naming the id and the directory searched. */
+  private requireSessionFile(sessionId: string, cwd: string): string {
+    const file = this.locateSessionFile(sessionId, cwd)
+    if (file) return file
+    const dir = getPiSessionDirForCwd(cwd)
+    throw RequestError.invalidParams({ sessionId, dir }, `No pi session file for session ${sessionId} in ${dir}`)
   }
 
   private async restoreSession(
@@ -264,12 +255,9 @@ export class PiAcpAgent {
     if (inFlight) return inFlight
 
     const restorePromise = (async () => {
-      const stored = this.findStoredSession(sessionId)
-      if (!stored) {
-        throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
-      }
-
-      const cwd = opts?.cwd ?? stored.cwd
+      const cwd = opts?.cwd ?? this.cwds.get(sessionId)
+      if (!cwd) throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
+      const sessionFile = this.requireSessionFile(sessionId, cwd)
 
       this.tryAcquireRespawnSlot(sessionId)
 
@@ -279,7 +267,7 @@ export class PiAcpAgent {
         const launch = this.launches.get(sessionId)
         proc = await PiRpcProcess.spawn({
           cwd,
-          sessionPath: stored.sessionFile,
+          sessionPath: sessionFile,
           piCommand: process.env.PI_ACP_PI_COMMAND,
           ...(mcpInjection ? { mcpInjection } : {}),
           ...(launch?.args.length ? { launchArgs: launch.args } : {}),
@@ -307,9 +295,9 @@ export class PiAcpAgent {
 
       try {
         this.lastSessionCwd = cwd
-        this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
+        this.cwds.set(sessionId, cwd)
 
-        const title = readPiSessionTitle(stored.sessionFile)
+        const title = readPiSessionTitle(sessionFile)
         if (title) await session.publishTitle(title, null)
 
         return session
@@ -424,6 +412,7 @@ export class PiAcpAgent {
       launch
     })
     this.launches.set(session.sessionId, launch)
+    this.cwds.set(session.sessionId, params.cwd)
 
     // Fetch state + models once (parallel) to reduce startup latency.
     let state: any = null
@@ -1133,11 +1122,6 @@ export class PiAcpAgent {
 
     this.lastSessionCwd = params.cwd
 
-    const stored = this.findStoredSession(params.sessionId)
-    if (!stored) {
-      throw RequestError.invalidParams(`Unknown sessionId: ${params.sessionId}`)
-    }
-
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
     const session = await this.restoreSession(params.sessionId, {
       cwd: params.cwd,
@@ -1159,13 +1143,6 @@ export class PiAcpAgent {
     // (see newSession — hosts may share one connection across threads).
     // (Tests sometimes stub out `this.sessions`, so guard the call.)
     ;(this.sessions as any).closeIdleExcept?.(session.sessionId)
-
-    // (Optional) ensure mapping stays fresh.
-    this.store.upsert({
-      sessionId: params.sessionId,
-      cwd: params.cwd,
-      sessionFile: stored.sessionFile
-    })
 
     // Replay full conversation history.
     const data = (await proc.getMessages()) as any
@@ -1337,17 +1314,14 @@ export class PiAcpAgent {
     }
     warnAdditionalDirectories('session/fork', params.additionalDirectories)
 
-    const stored = this.findStoredSession(params.sessionId)
-    if (!stored) {
-      throw RequestError.invalidParams(`Unknown sessionId: ${params.sessionId}`)
-    }
+    const sourceFile = this.requireSessionFile(params.sessionId, this.cwds.get(params.sessionId) ?? params.cwd)
 
     const mcpInjection = params.mcpServers?.length ? prepareMcpInjection(params.mcpServers) : null
     let proc: PiRpcProcess
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
-        forkSessionPath: stored.sessionFile,
+        forkSessionPath: sourceFile,
         piCommand: process.env.PI_ACP_PI_COMMAND,
         ...(mcpInjection ? { mcpInjection } : {})
       })
@@ -1366,7 +1340,6 @@ export class PiAcpAgent {
       state = null
     }
     const sessionId = typeof state?.sessionId === 'string' ? state.sessionId : crypto.randomUUID()
-    const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
 
     const fileCommands = loadSlashCommands(params.cwd)
     // Registers the forked session so subsequent requests address it directly.
@@ -1382,7 +1355,7 @@ export class PiAcpAgent {
 
     try {
       this.lastSessionCwd = params.cwd
-      if (sessionFile) this.store.upsert({ sessionId, cwd: params.cwd, sessionFile })
+      this.cwds.set(sessionId, params.cwd)
       const { configOptions, modes } = await getSessionConfiguration(proc)
       return { sessionId, modes, configOptions }
     } catch (err) {
@@ -1432,17 +1405,13 @@ export class PiAcpAgent {
 
   async deleteSession(params: DeleteSessionRequest): Promise<DeleteSessionResponse> {
     await this.closeSession(params)
-    const stored = this.store.get(params.sessionId)
-    const piSession = findPiSession(params.sessionId)
-
+    // The request carries no cwd: use the one this adapter knows, else the listing.
     // Per ACP session/delete semantics, deleting a session that does not
     // exist (or is already gone) should succeed idempotently.
     // https://agentclientprotocol.com/protocol/v2/session-delete#semantics
-    if (!stored && !piSession) {
-      return {}
-    }
-
-    const sessionFile = stored?.sessionFile ?? piSession?.sessionFile
+    const sessionFile =
+      this.locateSessionFile(params.sessionId, this.cwds.get(params.sessionId)) ??
+      listPiSessions().find(s => s.sessionId === params.sessionId)?.sessionFile
 
     if (sessionFile) {
       try {
@@ -1454,7 +1423,7 @@ export class PiAcpAgent {
       }
     }
 
-    this.store.delete(params.sessionId)
+    this.cwds.delete(params.sessionId)
 
     return {}
   }

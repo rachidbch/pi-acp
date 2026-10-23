@@ -1,18 +1,19 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
+import { writePiSession } from '../helpers/session-files.js'
 
-class FakeStore {
-  get(_sessionId: string) {
-    return { sessionId: 's1', cwd: '/tmp/project', sessionFile: '/tmp/s.jsonl', updatedAt: new Date().toISOString() }
-  }
-  upsert() {}
-}
-
-test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update', async () => {
+test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update', async t => {
+  const sessionDir = mkdtempSync(join(tmpdir(), 'pi-acp-toolresult-'))
+  writePiSession(sessionDir, 's1', '/tmp/project')
+  process.env.PI_CODING_AGENT_SESSION_DIR = sessionDir
+  t.after(() => delete process.env.PI_CODING_AGENT_SESSION_DIR)
   const originalSpawn = PiRpcProcess.spawn
   ;(PiRpcProcess as any).spawn = async () => {
     return {
@@ -38,7 +39,6 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
   try {
     const conn = new FakeAgentSideConnection()
     const agent = new PiAcpAgent(asAgentConn(conn))
-    ;(agent as any).store = new FakeStore()
 
     await agent.loadSession({ sessionId: 's1', cwd: '/tmp/project', mcpServers: [] } as any)
 

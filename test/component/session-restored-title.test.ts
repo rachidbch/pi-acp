@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { listPiSessions } from '../../src/acp/pi-sessions.js'
-import { SessionStore } from '../../src/acp/session-store.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
+import { piSessionDir } from '../helpers/session-files.js'
 
 class RestoredPiProcess extends FakePiRpcProcess {
   readonly assignedNames: string[] = []
@@ -29,9 +29,9 @@ for (const mode of ['load', 'prompt'] as const) {
   for (const titleState of ['saved', 'fallback', 'cleared', 'cleared-in-tail'] as const) {
     test(`PiAcpAgent: ${mode} restores ${titleState} title without renaming history`, async t => {
       const root = mkdtempSync(join(tmpdir(), 'pi-acp-restored-title-'))
-      const sessionsDir = join(root, 'sessions')
-      const sessionFile = join(sessionsDir, 'history.jsonl')
-      mkdirSync(sessionsDir)
+      const sessionsDir = piSessionDir(root, root)
+      const sessionFile = join(sessionsDir, '2026-01-01T00-00-00-000Z_restored.jsonl')
+      mkdirSync(sessionsDir, { recursive: true })
       const firstContent = [
         { type: 'text', text: '  Original \n' },
         { type: 'image', data: 'ignored' },
@@ -65,9 +65,6 @@ for (const mode of ['load', 'prompt'] as const) {
 
       const conn = new FakeAgentSideConnection()
       const agent = new PiAcpAgent(asAgentConn(conn))
-      const store = new SessionStore(join(root, 'session-map.json'))
-      store.upsert({ sessionId: 'restored', cwd: root, sessionFile })
-      Object.defineProperty(agent, 'store', { value: store })
       const proc = new RestoredPiProcess()
       t.mock.method(PiRpcProcess, 'spawn', async () => proc as unknown as PiRpcProcess)
       t.after(() => agent.dispose())
@@ -75,6 +72,8 @@ for (const mode of ['load', 'prompt'] as const) {
       if (mode === 'load') {
         await agent.loadSession({ sessionId: 'restored', cwd: root, mcpServers: [] })
       } else {
+        // A prompt restores a session this adapter already knows (loaded, then closed or crashed).
+        Reflect.get(agent, 'cwds').set('restored', root)
         const prompt = agent.prompt({ sessionId: 'restored', prompt: [{ type: 'text', text: 'Continue work' }] })
         await new Promise(resolve => setImmediate(resolve))
         proc.emit({ type: 'agent_settled' })
