@@ -85,3 +85,26 @@ test('steering accepted while final usage publishes is replayed before ACP resol
     assert.equal(await result, 'end_turn')
   } finally { session.dispose() }
 })
+
+test('steering cancel waits for in-flight injection before clearing pi queue and aborting', async () => {
+  const proc = new FakePiRpcProcess()
+  const order: string[] = []
+  let release!: () => void
+  Object.assign(proc, {
+    steer: () => new Promise(resolve => { release = () => { order.push('steer'); resolve('queued') } }),
+    clearQueue: async () => { order.push('clear'); return { steering: [], followUp: [] } },
+    abort: async () => { order.push('abort') }
+  })
+  const session = new PiAcpSession({ sessionId: 's', cwd: process.cwd(), mcpServers: [], proc: proc as any, conn: asAgentConn(new FakeAgentSideConnection()) })
+  try {
+    const result = session.prompt('original')
+    proc.emit({ type: 'agent_start' })
+    const inject = session.steer('pending')
+    const cancel = session.cancel()
+    release()
+    await Promise.all([inject, cancel])
+    assert.deepEqual(order, ['steer', 'clear', 'abort'])
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await result, 'cancelled')
+  } finally { session.dispose() }
+})
