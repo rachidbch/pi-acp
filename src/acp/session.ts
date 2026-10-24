@@ -659,6 +659,7 @@ export class PiAcpSession {
     this.cancelRequested = true
     this.steering.clear()
     this.steeringReplay = []
+    await this.steering.drain()
     if (typeof this.proc.clearQueue === 'function') await this.proc.clearQueue()
     this.interactions.abort()
     this.finishOutstandingTools('Cancelled.')
@@ -776,6 +777,21 @@ export class PiAcpSession {
   }
 
   private async settleTurn(): Promise<void> {
+    try {
+      await this.settleSteering()
+    } catch (err) {
+      const turn = this.pendingTurn
+      if (!turn) return
+      this.steering.clear()
+      this.steeringReplay = []
+      turn.completing = false
+      turn.outcome = 'error'
+      turn.errorMessage = String(err)
+      await this.completeTurn(turn)
+    }
+  }
+
+  private async settleSteering(): Promise<void> {
     this.inAgentLoop = false
     const turn = this.pendingTurn
     if (turn) {
@@ -817,6 +833,11 @@ export class PiAcpSession {
     // delivered before we resolve the ACP `session/prompt` request.
     const postStats = await this.publishContextUsage()
     if (this.pendingTurn !== turn) return
+    if (!this.cancelRequested && this.steering.hasPending) {
+      turn.completing = false
+      await this.settleTurn()
+      return
+    }
     this.pendingTurn = null
     if (turn.queued.usageOut) {
       const stopReason: StopReason = cancelled ? 'cancelled' : (turn.outcome ?? 'end_turn')
@@ -1444,7 +1465,7 @@ export class PiAcpSession {
 
       case 'agent_start': {
         this.inAgentLoop = true
-        void this.steering.running()
+        void this.steering.running().catch(() => {})
         break
       }
 

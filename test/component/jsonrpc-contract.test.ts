@@ -66,6 +66,15 @@ test('unknown JSON-RPC methods get an error response, not silence or a crash', {
   assert.ok(response.error, 'unknown method must answer with a JSON-RPC error')
 })
 
+test('custom steering method reaches validation through SDK 2 request routing', { timeout: 5000 }, async t => {
+  const wire = startWire()
+  t.after(() => wire.server.connection.close())
+  wire.send({ jsonrpc: '2.0', id: 71, method: '_session/steering', params: { sessionId: 'missing', prompt: [] } })
+  const response = (await wire.next()) as { id: number; error?: { code: number } }
+  assert.equal(response.id, 71)
+  assert.equal(response.error?.code, -32602)
+})
+
 test('malformed session/new params are rejected before the handler runs', { timeout: 5000 }, async t => {
   const wire = startWire()
   t.after(() => wire.server.connection.close())

@@ -67,9 +67,18 @@ test('steering replays extension steers then follow-ups individually inside the 
 test('steering accepted while final usage publishes is replayed before ACP resolves', async () => {
   const proc = new FakePiRpcProcess()
   Object.assign(proc, { clearQueue: async () => ({ steering: [], followUp: [] }) })
-  const session = new PiAcpSession({ sessionId: 's', cwd: process.cwd(), mcpServers: [], proc: proc as any, conn: asAgentConn(new FakeAgentSideConnection()) })
+  const session = new PiAcpSession({
+    sessionId: 's',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(new FakeAgentSideConnection())
+  })
   let release!: () => void
-  session.publishContextUsage = () => new Promise(resolve => { release = () => resolve(null) })
+  session.publishContextUsage = () =>
+    new Promise(resolve => {
+      release = () => resolve(null)
+    })
   try {
     const result = session.prompt('original')
     await new Promise(resolve => setImmediate(resolve))
@@ -79,11 +88,16 @@ test('steering accepted while final usage publishes is replayed before ACP resol
     assert.deepEqual(await session.steer('late'), { outcome: 'injected' })
     release()
     await new Promise(resolve => setImmediate(resolve))
-    assert.deepEqual(proc.prompts.map(item => item.message), ['original', 'late'])
+    assert.deepEqual(
+      proc.prompts.map(item => item.message),
+      ['original', 'late']
+    )
     session.publishContextUsage = async () => null
     proc.emit({ type: 'agent_settled' })
     assert.equal(await result, 'end_turn')
-  } finally { session.dispose() }
+  } finally {
+    session.dispose()
+  }
 })
 
 test('steering cancel waits for in-flight injection before clearing pi queue and aborting', async () => {
@@ -91,11 +105,28 @@ test('steering cancel waits for in-flight injection before clearing pi queue and
   const order: string[] = []
   let release!: () => void
   Object.assign(proc, {
-    steer: () => new Promise(resolve => { release = () => { order.push('steer'); resolve('queued') } }),
-    clearQueue: async () => { order.push('clear'); return { steering: [], followUp: [] } },
-    abort: async () => { order.push('abort') }
+    steer: () =>
+      new Promise(resolve => {
+        release = () => {
+          order.push('steer')
+          resolve('queued')
+        }
+      }),
+    clearQueue: async () => {
+      order.push('clear')
+      return { steering: [], followUp: [] }
+    },
+    abort: async () => {
+      order.push('abort')
+    }
   })
-  const session = new PiAcpSession({ sessionId: 's', cwd: process.cwd(), mcpServers: [], proc: proc as any, conn: asAgentConn(new FakeAgentSideConnection()) })
+  const session = new PiAcpSession({
+    sessionId: 's',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(new FakeAgentSideConnection())
+  })
   try {
     const result = session.prompt('original')
     proc.emit({ type: 'agent_start' })
@@ -106,5 +137,38 @@ test('steering cancel waits for in-flight injection before clearing pi queue and
     assert.deepEqual(order, ['steer', 'clear', 'abort'])
     proc.emit({ type: 'agent_settled' })
     assert.equal(await result, 'cancelled')
-  } finally { session.dispose() }
+  } finally {
+    session.dispose()
+  }
+})
+
+test('steering held RPC failure ends its turn and does not poison a later prompt', async () => {
+  const proc = new FakePiRpcProcess()
+  Object.assign(proc, {
+    steer: async () => {
+      throw new Error('STEER_REJECTED')
+    },
+    clearQueue: async () => ({ steering: [], followUp: [] })
+  })
+  const session = new PiAcpSession({
+    sessionId: 's',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(new FakeAgentSideConnection())
+  })
+  try {
+    const result = assert.rejects(session.prompt('first'), /STEER_REJECTED/)
+    await session.steer('held')
+    proc.emit({ type: 'agent_start' })
+    await new Promise(resolve => setImmediate(resolve))
+    proc.emit({ type: 'agent_settled' })
+    await result
+    const next = session.prompt('second')
+    await new Promise(resolve => setImmediate(resolve))
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await next, 'end_turn')
+  } finally {
+    session.dispose()
+  }
 })

@@ -23,3 +23,22 @@ test('steering windows hold start, inject running, replay settle in pi order and
   steering.clear()
   assert.deepEqual(await steering.leftovers(async () => ({ steering: [], followUp: [] })), [])
 })
+
+test('steering handled input is never replayed and delayed clear preserves a concurrent steer', async () => {
+  const steering = new Steering(async () => 'handled')
+  steering.start()
+  await steering.running()
+  await steering.inject('handled')
+  steering.ended()
+  let release!: () => void
+  const leftovers = steering.leftovers(
+    () =>
+      new Promise(resolve => {
+        release = () => resolve({ steering: ['extension'], followUp: ['follow'] })
+      })
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  await steering.inject('during-clear')
+  release()
+  assert.deepEqual(await leftovers, ['extension', 'during-clear', 'follow'])
+})
