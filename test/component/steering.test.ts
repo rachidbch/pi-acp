@@ -25,6 +25,22 @@ test('steering held before a rejected original prompt never leaks into the next 
   } finally { session.dispose() }
 })
 
+test('steering cancellation still clears queued prompts and aborts after clear_queue rejection', async () => {
+  const proc = new FakePiRpcProcess()
+  Object.assign(proc, { clearQueue: async () => { throw new Error('CLEAR_REJECTED') } })
+  const session = new PiAcpSession({ sessionId: 's', cwd: process.cwd(), mcpServers: [], proc: proc as any, conn: asAgentConn(new FakeAgentSideConnection()) })
+  try {
+    const active = session.prompt('active')
+    const queued = session.prompt('queued')
+    await assert.rejects(session.cancel(), /CLEAR_REJECTED/)
+    assert.equal(proc.abortCount, 1)
+    assert.equal(await queued, 'cancelled')
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await active, 'cancelled')
+    assert.equal(proc.prompts.length, 1)
+  } finally { session.dispose() }
+})
+
 test('steering advertises capability and rejects invalid requests', async () => {
   const agent = new PiAcpAgent(asAgentConn(new FakeAgentSideConnection()))
   try {
