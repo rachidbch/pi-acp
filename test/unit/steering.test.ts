@@ -2,6 +2,28 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Steering } from '../../src/acp/steering.js'
 
+test('steering stops draining held messages after end or clear while an RPC is pending', async () => {
+  for (const transition of ['end', 'clear'] as const) {
+    const sent: string[] = []
+    let release!: () => void
+    const steering = new Steering(text => {
+      sent.push(text)
+      return new Promise(resolve => { release = () => resolve('queued') })
+    })
+    steering.start()
+    await steering.inject('first')
+    await steering.inject('second')
+    const running = steering.running()
+    if (transition === 'end') steering.ended()
+    else steering.clear()
+    release()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(sent, ['first'], transition)
+    await running
+    assert.deepEqual(await steering.leftovers(async () => ({ steering: [], followUp: [] })), transition === 'end' ? ['second'] : [])
+  }
+})
+
 test('steering windows hold start, inject running, replay settle in pi order and clear cancel', async () => {
   const sent: string[] = []
   const steering = new Steering(async text => {
