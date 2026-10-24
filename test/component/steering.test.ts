@@ -63,3 +63,25 @@ test('steering replays extension steers then follow-ups individually inside the 
     session.dispose()
   }
 })
+
+test('steering accepted while final usage publishes is replayed before ACP resolves', async () => {
+  const proc = new FakePiRpcProcess()
+  Object.assign(proc, { clearQueue: async () => ({ steering: [], followUp: [] }) })
+  const session = new PiAcpSession({ sessionId: 's', cwd: process.cwd(), mcpServers: [], proc: proc as any, conn: asAgentConn(new FakeAgentSideConnection()) })
+  let release!: () => void
+  session.publishContextUsage = () => new Promise(resolve => { release = () => resolve(null) })
+  try {
+    const result = session.prompt('original')
+    await new Promise(resolve => setImmediate(resolve))
+    proc.emit({ type: 'agent_end' })
+    proc.emit({ type: 'agent_settled' })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(await session.steer('late'), { outcome: 'injected' })
+    release()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(proc.prompts.map(item => item.message), ['original', 'late'])
+    session.publishContextUsage = async () => null
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await result, 'end_turn')
+  } finally { session.dispose() }
+})
