@@ -5,6 +5,26 @@ import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 import { FakePiRpcProcess } from '../helpers/fakes.js'
 import { PiAcpSession } from '../../src/acp/session.js'
 
+test('steering held before a rejected original prompt never leaks into the next prompt', async () => {
+  const proc = new FakePiRpcProcess()
+  const sent: string[] = []
+  Object.assign(proc, { steer: async (text: string) => { sent.push(text); return 'queued' }, clearQueue: async () => ({ steering: [], followUp: [] }) })
+  const session = new PiAcpSession({ sessionId: 's', cwd: process.cwd(), mcpServers: [], proc: proc as any, conn: asAgentConn(new FakeAgentSideConnection()) })
+  try {
+    proc.promptError = new Error('ORIGINAL_REJECTED')
+    const first = session.prompt('first')
+    await session.steer('stale')
+    assert.equal(await first, 'error')
+    proc.promptError = null
+    const next = session.prompt('second')
+    proc.emit({ type: 'agent_start' })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(sent, [])
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await next, 'end_turn')
+  } finally { session.dispose() }
+})
+
 test('steering advertises capability and rejects invalid requests', async () => {
   const agent = new PiAcpAgent(asAgentConn(new FakeAgentSideConnection()))
   try {
