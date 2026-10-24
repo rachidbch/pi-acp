@@ -8,7 +8,9 @@ test('steering stops draining held messages after end or clear while an RPC is p
     let release!: () => void
     const steering = new Steering(text => {
       sent.push(text)
-      return new Promise(resolve => { release = () => resolve('queued') })
+      return new Promise(resolve => {
+        release = () => resolve('queued')
+      })
     })
     steering.start()
     await steering.inject('first')
@@ -20,7 +22,10 @@ test('steering stops draining held messages after end or clear while an RPC is p
     await new Promise(resolve => setImmediate(resolve))
     assert.deepEqual(sent, ['first'], transition)
     await running
-    assert.deepEqual(await steering.leftovers(async () => ({ steering: [], followUp: [] })), transition === 'end' ? ['second'] : [])
+    assert.deepEqual(
+      await steering.leftovers(async () => ({ steering: [], followUp: [] })),
+      transition === 'end' ? ['second'] : []
+    )
   }
 })
 

@@ -6,6 +6,7 @@ export class Steering {
   private entries: Entry[] = []
   private pending = new Set<Promise<void>>()
   private failure: unknown
+  private generation = 0
 
   get hasPending(): boolean {
     return this.entries.length > 0
@@ -14,12 +15,15 @@ export class Steering {
   constructor(private readonly send: (text: string) => Promise<string | undefined>) {}
 
   start(): void {
+    this.generation++
     this.phase = 'start'
   }
   ended(): void {
+    this.generation++
     this.phase = 'end'
   }
   clear(): void {
+    this.generation++
     this.entries = []
     this.failure = undefined
     this.phase = 'end'
@@ -38,7 +42,7 @@ export class Steering {
         if (disposition === 'handled') this.entries = this.entries.filter(item => item !== entry)
       },
       error => {
-        this.failure = error
+        if (this.entries.includes(entry)) this.failure = error
         throw error
       }
     )
@@ -47,8 +51,12 @@ export class Steering {
   }
 
   async running(): Promise<void> {
+    const generation = ++this.generation
     this.phase = 'running'
-    for (const entry of this.entries) if (!entry.sent) await this.deliver(entry)
+    for (const entry of this.entries) {
+      if (generation !== this.generation || this.phase !== 'running') break
+      if (!entry.sent) await this.deliver(entry)
+    }
   }
 
   async leftovers(clear: () => Promise<Queue>): Promise<string[]> {

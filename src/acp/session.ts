@@ -659,8 +659,6 @@ export class PiAcpSession {
     this.cancelRequested = true
     this.steering.clear()
     this.steeringReplay = []
-    await this.steering.drain()
-    if (typeof this.proc.clearQueue === 'function') await this.proc.clearQueue()
     this.interactions.abort()
     this.finishOutstandingTools('Cancelled.')
 
@@ -680,7 +678,12 @@ export class PiAcpSession {
     }
 
     // Abort the currently running turn (if any). If nothing is running, this is a no-op.
-    await this.proc.abort()
+    try {
+      await this.steering.drain()
+      if (typeof this.proc.clearQueue === 'function') await this.proc.clearQueue()
+    } finally {
+      await this.proc.abort()
+    }
   }
 
   wasCancelRequested(): boolean {
@@ -948,6 +951,8 @@ export class PiAcpSession {
   }
 
   private startTurn(t: QueuedTurn): void {
+    this.steering.clear()
+    this.steeringReplay = []
     this.steering.start()
     this.cancelRequested = false
     this.inAgentLoop = false
@@ -1005,6 +1010,8 @@ export class PiAcpSession {
         // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
         if (this.pendingTurn !== turn) return
         const authErr = maybeAuthRequiredError(err, this.clientCapabilities)
+        this.steering.clear()
+        this.steeringReplay = []
         this.pendingTurn = null
         if (turn.queued.usageOut) turn.queued.usageOut.error = err instanceof Error ? err.message : String(err)
         if (this.cancelRequested) turn.resolve('cancelled')
