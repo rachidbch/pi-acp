@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -24,24 +24,24 @@ const flagValue = (argv: string[], flag: string) => argv[argv.indexOf(flag) + 1]
 
 const LAUNCH = ['-ne', '-e', '/abs/ext.ts', '--model', 'fake/fake-model', '--thinking', 'low']
 
-async function newAgent() {
+async function newAgent(t: TestContext) {
   const conn = new FakeAgentSideConnection()
   const agent = new PiAcpAgent(asAgentConn(conn))
+  t.after(() => agent.dispose())
   const init = await agent.initialize({ protocolVersion: 1, clientCapabilities: {} } as any)
   return { conn, agent, init }
 }
 
-test('initialize advertises launch, systemPrompt and headless under agentCapabilities._meta.piAcp', async () => {
-  const { agent, init } = await newAgent()
+test('initialize advertises launch, systemPrompt and headless under agentCapabilities._meta.piAcp', async t => {
+  const { init } = await newAgent(t)
   const piAcp = (init.agentCapabilities?._meta as any)?.piAcp
   assert.ok(piAcp.launch.flags.includes('-ne'))
   assert.deepEqual(piAcp.systemPrompt.modes, ['append', 'replace'])
   assert.equal(piAcp.headless, true)
-  agent.dispose()
 })
 
-test('session/new passes allowlisted flags and the system prompt file to pi; the file goes with the child', async () => {
-  const { agent } = await newAgent()
+test('session/new passes allowlisted flags and the system prompt file to pi; the file goes with the child', async t => {
+  const { agent } = await newAgent(t)
   const res = await agent.newSession({
     cwd: scratch,
     mcpServers: [],
@@ -55,20 +55,18 @@ test('session/new passes allowlisted flags and the system prompt file to pi; the
   await agent.closeSession({ sessionId: res.sessionId } as any)
   for (let i = 0; i < 50 && existsSync(promptFile); i++) await new Promise(r => setTimeout(r, 20))
   assert.equal(existsSync(promptFile), false, 'prompt file removed on child exit')
-  agent.dispose()
 })
 
-test('session/new rejects an adapter-owned flag before spawning pi', async () => {
-  const { agent } = await newAgent()
+test('session/new rejects an adapter-owned flag before spawning pi', async t => {
+  const { agent } = await newAgent(t)
   await assert.rejects(
     agent.newSession({ cwd: scratch, mcpServers: [], _meta: { piAcp: { launch: ['--session', 'x'] } } } as any),
     (err: any) => err?.code === -32602
   )
-  agent.dispose()
 })
 
-test('resume and a crash-style restore relaunch pi with the same flags', async () => {
-  const { agent } = await newAgent()
+test('resume and a crash-style restore relaunch pi with the same flags', async t => {
+  const { agent } = await newAgent(t)
   const meta = { piAcp: { launch: LAUNCH }, systemPrompt: 'REPLACED' }
   const { sessionId } = await agent.newSession({ cwd: scratch, mcpServers: [], _meta: meta } as any)
   await agent.closeSession({ sessionId } as any)
@@ -87,11 +85,10 @@ test('resume and a crash-style restore relaunch pi with the same flags', async (
   await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'hi' }] } as any)
   argv = readArgv()
   assert.deepEqual(argv.slice(3, 3 + LAUNCH.length), LAUNCH)
-  agent.dispose()
 })
 
-test('headless: no banner or text notices in the stream; prompt result carries the _meta.piAcp summary', async () => {
-  const { agent, conn } = await newAgent()
+test('headless: no banner or text notices in the stream; prompt result carries the _meta.piAcp summary', async t => {
+  const { agent, conn } = await newAgent(t)
   const { sessionId } = await agent.newSession({
     cwd: scratch,
     mcpServers: [],
@@ -112,16 +109,14 @@ test('headless: no banner or text notices in the stream; prompt result carries t
     compactions: 0,
     usage: { input: 120, output: 7, cacheRead: 30, cacheWrite: 4, cost: 0.0022 }
   })
-  agent.dispose()
 })
 
-test('not headless: the startup banner still reaches the stream', async () => {
-  const { agent, conn } = await newAgent()
+test('not headless: the startup banner still reaches the stream', async t => {
+  const { agent, conn } = await newAgent(t)
   await agent.newSession({ cwd: scratch, mcpServers: [] } as any)
   await new Promise(r => setTimeout(r, 50))
   const banner = conn.updates.some(
     (u: any) => u.update.sessionUpdate === 'agent_message_chunk' && /pi/i.test(u.update.content?.text ?? '')
   )
   assert.ok(banner)
-  agent.dispose()
 })
