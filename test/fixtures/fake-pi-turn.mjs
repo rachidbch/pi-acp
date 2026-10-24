@@ -95,6 +95,9 @@ process.stdin.on('data', chunk => {
         ok(msg)
         setImmediate(runTurn)
         break
+      case 'clear_queue':
+        ok(msg, { steering: [], followUp: [] })
+        break
       default:
         ok(msg, {})
     }
