@@ -1384,6 +1384,9 @@ export class PiAcpAgent {
 
     const launch = parseLaunchOptions(params._meta)
     const existing = this.sessions.maybeGet(params.sessionId)
+    if (existing && existing.trustedParent !== launch.trustedParent) {
+      throw RequestError.invalidParams('Close the session before resuming with a different trustedParent value')
+    }
     const session = await this.restoreSession(params.sessionId, {
       cwd: params.cwd,
       mcpServers: params.mcpServers ?? [],

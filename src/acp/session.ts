@@ -324,7 +324,8 @@ export class SessionManager {
       autoTitle: true,
       mcpInjection,
       clientCapabilities: params.clientCapabilities,
-      headless: params.launch?.headless === true
+      headless: params.launch?.headless === true,
+      trustedParent: params.launch?.trustedParent === true
     })
 
     this.sessions.set(sessionId, session)
@@ -358,7 +359,8 @@ export class SessionManager {
       autoTitle: false,
       mcpInjection: params.mcpInjection,
       clientCapabilities: params.clientCapabilities,
-      headless: params.launch?.headless === true
+      headless: params.launch?.headless === true,
+      trustedParent: params.launch?.trustedParent === true
     })
 
     this.sessions.set(sessionId, session)
@@ -374,6 +376,7 @@ export class PiAcpSession {
   private readonly clientCapabilities: ClientCapabilities
   /** `_meta.piAcp.headless`: no banner or queue chatter; notices go out as `_meta`. */
   readonly headless: boolean
+  readonly trustedParent: boolean
 
   private startupInfo: string | null = null
   private startupInfoSent = false
@@ -449,6 +452,7 @@ export class PiAcpSession {
     mcpInjection?: McpInjectionPlan | null
     clientCapabilities?: ClientCapabilities
     headless?: boolean
+    trustedParent?: boolean
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -460,6 +464,7 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
     this.initialTitlePending = opts.autoTitle ?? false
     this.headless = opts.headless === true
+    this.trustedParent = opts.trustedParent === true
 
     this.unsubscribe = this.proc.onEvent(ev => {
       if (!this.disposed) this.handlePiEvent(ev)
@@ -1400,6 +1405,7 @@ export class PiAcpSession {
           sessionId: this.sessionId,
           conn: this.conn,
           clientCapabilities: this.clientCapabilities,
+          trustedParent: this.trustedParent,
           signal: this.interactions.signal,
           sendResponse: response => this.proc.sendExtensionUiResponse(response),
           emit: update => this.emit(update)

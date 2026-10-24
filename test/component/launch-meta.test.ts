@@ -32,12 +32,13 @@ async function newAgent(t: TestContext) {
   return { conn, agent, init }
 }
 
-test('initialize advertises launch, systemPrompt and headless under agentCapabilities._meta.piAcp', async t => {
+test('initialize advertises launch, systemPrompt, headless and trustedParent under agentCapabilities._meta.piAcp', async t => {
   const { init } = await newAgent(t)
   const piAcp = (init.agentCapabilities?._meta as any)?.piAcp
   assert.ok(piAcp.launch.flags.includes('-ne'))
   assert.deepEqual(piAcp.systemPrompt.modes, ['append', 'replace'])
   assert.equal(piAcp.headless, true)
+  assert.equal(piAcp.trustedParent, true)
 })
 
 test('session/new passes allowlisted flags and the system prompt file to pi; the file goes with the child', async t => {
@@ -45,13 +46,15 @@ test('session/new passes allowlisted flags and the system prompt file to pi; the
   const res = await agent.newSession({
     cwd: scratch,
     mcpServers: [],
-    _meta: { piAcp: { launch: LAUNCH, headless: true }, systemPrompt: { append: 'PERSONA-BODY' } }
+    _meta: { piAcp: { launch: LAUNCH, headless: true, trustedParent: true }, systemPrompt: { append: 'PERSONA-BODY' } }
   } as any)
   const argv = readArgv()
   assert.deepEqual(argv.slice(0, 3), ['--mode', 'rpc', '--no-themes'])
   assert.deepEqual(argv.slice(3, 3 + LAUNCH.length), LAUNCH)
   const promptFile = flagValue(argv, '--append-system-prompt')
   assert.equal(readFileSync(promptFile, 'utf8'), 'PERSONA-BODY')
+  const session = (Reflect.get(agent, 'sessions') as any).get(res.sessionId)
+  assert.equal(session.trustedParent, true)
   await agent.closeSession({ sessionId: res.sessionId } as any)
   for (let i = 0; i < 50 && existsSync(promptFile); i++) await new Promise(r => setTimeout(r, 20))
   assert.equal(existsSync(promptFile), false, 'prompt file removed on child exit')
@@ -64,6 +67,31 @@ test('session/new rejects an adapter-owned flag before spawning pi', async t => 
     (err: any) => err?.code === -32602
   )
 })
+
+for (const [initial, requested] of [
+  [true, false],
+  [false, true]
+] as const) {
+  test(`resume rejects trustedParent change ${initial} -> ${requested} without mutating remembered launch`, async t => {
+    const { agent } = await newAgent(t)
+    const metadata = { piAcp: { trustedParent: initial } }
+    const { sessionId } = await agent.newSession({ cwd: scratch, mcpServers: [], _meta: metadata } as any)
+    const launches = Reflect.get(agent, 'launches') as Map<string, { trustedParent: boolean }>
+
+    await assert.rejects(
+      agent.resumeSession({
+        sessionId,
+        cwd: scratch,
+        mcpServers: [],
+        _meta: { piAcp: { trustedParent: requested } }
+      } as any),
+      (error: any) =>
+        error?.code === -32602 &&
+        error?.data === 'Close the session before resuming with a different trustedParent value'
+    )
+    assert.equal(launches.get(sessionId)?.trustedParent, initial)
+  })
+}
 
 test('resume and a crash-style restore relaunch pi with the same flags', async t => {
   const { agent } = await newAgent(t)

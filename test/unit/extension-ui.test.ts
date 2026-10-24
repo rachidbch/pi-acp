@@ -345,6 +345,47 @@ test('Pi timeout releases a pending dialog without a stale Pi response', async (
   assert.deepEqual(f.responses, [])
 })
 
+test('Pi timeout cancels the pending client request', async () => {
+  const f = fixture(formCapabilities)
+  let requestSignal!: AbortSignal
+  f.host.conn.createElicitation = (_request, signal) => {
+    requestSignal = signal!
+    return new Promise(() => {})
+  }
+  await f.run('input', { timeout: 5 })
+  assert.equal(requestSignal.aborted, true)
+})
+
+test('session cancellation cancels the pending client request', async () => {
+  const f = fixture(formCapabilities)
+  let requestSignal!: AbortSignal
+  f.host.conn.createElicitation = (_request, signal) => {
+    requestSignal = signal!
+    return new Promise(() => {})
+  }
+  const handling = f.run('input')
+  f.session.abort()
+  await handling
+  assert.equal(requestSignal.aborted, true)
+})
+
+test('trusted parent permits credential-word text requests', async () => {
+  const f = fixture(formCapabilities)
+  f.host.trustedParent = true
+  f.answers.form = async () => ({ action: 'accept', content: { value: 'secret' } })
+  await f.run('input', { title: 'Enter password' })
+  assert.equal(f.forms.length, 1)
+  assert.deepEqual(f.responses, [{ id: 'ui-1', value: 'secret' }])
+})
+
+test('trusted parent still rejects explicitly sensitive text requests', async () => {
+  const f = fixture(formCapabilities)
+  f.host.trustedParent = true
+  await f.run('input', { password: true })
+  assert.equal(f.forms.length, 0)
+  assert.deepEqual(f.responses, [{ id: 'ui-1', cancelled: true }])
+})
+
 test('a failing response write is not retried as another cancellation', async () => {
   const f = fixture()
   let writes = 0

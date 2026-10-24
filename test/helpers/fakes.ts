@@ -6,6 +6,8 @@ type SessionUpdateMsg = Parameters<AcpClient['sessionUpdate']>[0]
 export class FakeAgentSideConnection {
   readonly updates: SessionUpdateMsg[] = []
   readonly permissionRequests: unknown[] = []
+  readonly elicitationRequests: unknown[] = []
+  readonly requestSignals: AbortSignal[] = []
   readonly extNotifications: Array<{ method: string; params: unknown }> = []
   private readonly abortController = new AbortController()
   get signal(): AbortSignal {
@@ -25,10 +27,18 @@ export class FakeAgentSideConnection {
   }
 
   async requestPermission(
-    params: unknown
+    params: unknown,
+    signal?: AbortSignal
   ): Promise<{ outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } }> {
     this.permissionRequests.push(params)
+    if (signal) this.requestSignals.push(signal)
     return this.nextPermissionResponse
+  }
+
+  async createElicitation(params: unknown, signal?: AbortSignal): Promise<never> {
+    this.elicitationRequests.push(params)
+    if (signal) this.requestSignals.push(signal)
+    return new Promise(() => {})
   }
 }
 

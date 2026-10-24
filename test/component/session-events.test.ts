@@ -224,6 +224,41 @@ test('PiAcpSession: handles extension confirm via ACP permission request', async
   assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-2', confirmed: false }])
 })
 
+for (const trigger of ['Pi dialog timeout', 'session cancel', 'child disposal'] as const) {
+  test(`PiAcpSession: ${trigger} cancels its pending ACP elicitation`, async () => {
+    const conn = new FakeAgentSideConnection()
+    const proc = new FakePiRpcProcess()
+    const session = new PiAcpSession({
+      sessionId: 's-cancel-dialog',
+      cwd: process.cwd(),
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      clientCapabilities: { elicitation: { form: {} } } as any,
+      fileCommands: []
+    })
+
+    proc.emit({
+      type: 'extension_ui_request',
+      id: 'ui-cancel',
+      method: 'input',
+      title: 'Continue?',
+      ...(trigger === 'Pi dialog timeout' ? { timeout: 5 } : {})
+    })
+    for (let i = 0; i < 20 && conn.requestSignals.length === 0; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1))
+    }
+    assert.equal(conn.elicitationRequests.length, 1)
+    const signal = conn.requestSignals[0]!
+
+    if (trigger === 'session cancel') await session.cancel()
+    else if (trigger === 'child disposal') session.dispose('error')
+    else await new Promise(resolve => setTimeout(resolve, 15))
+
+    assert.equal(signal.aborted, true)
+  })
+}
+
 test('PiAcpSession: sends cancelled response when ACP confirm is cancelled', async () => {
   const conn = new FakeAgentSideConnection()
   conn.nextPermissionResponse = { outcome: { outcome: 'cancelled' } }

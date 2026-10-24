@@ -14,8 +14,8 @@ import { PiAcpAgent } from './agent.js'
 export type AcpClient = {
   readonly signal: AbortSignal
   sessionUpdate(params: SessionNotification): Promise<void>
-  requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse>
-  createElicitation(params: CreateElicitationRequest): Promise<CreateElicitationResponse>
+  requestPermission(params: RequestPermissionRequest, signal?: AbortSignal): Promise<RequestPermissionResponse>
+  createElicitation(params: CreateElicitationRequest, signal?: AbortSignal): Promise<CreateElicitationResponse>
   extNotification(method: string, params?: Record<string, unknown>): Promise<void>
 }
 
@@ -26,8 +26,10 @@ export function connectPiAgent(stream: Stream): { agent: PiAcpAgent; connection:
       implementation = new PiAcpAgent({
         signal,
         sessionUpdate: params => client.notify('session/update', params),
-        requestPermission: params => client.request('session/request_permission', params),
-        createElicitation: params => client.request('elicitation/create', params),
+        requestPermission: (params, signal) =>
+          client.request('session/request_permission', params, signal ? { cancellationSignal: signal } : undefined),
+        createElicitation: (params, signal) =>
+          client.request('elicitation/create', params, signal ? { cancellationSignal: signal } : undefined),
         extNotification: (method, params) => client.notify(method, params)
       })
     })

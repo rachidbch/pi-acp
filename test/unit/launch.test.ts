@@ -63,10 +63,17 @@ test('system prompt: string replaces, {append} appends, other shapes fail', () =
 })
 
 test('launch options: read from _meta.piAcp and _meta.systemPrompt', () => {
-  assert.deepEqual(parseLaunchOptions({ piAcp: { launch: ['-ne'], headless: true }, systemPrompt: { append: 'X' } }), {
-    args: ['-ne'],
-    systemPrompt: { mode: 'append', text: 'X' },
-    headless: true
-  })
-  assert.deepEqual(parseLaunchOptions(undefined), { args: [], headless: false })
+  assert.deepEqual(
+    parseLaunchOptions({
+      piAcp: { launch: ['-ne'], headless: true, trustedParent: true },
+      systemPrompt: { append: 'X' }
+    }),
+    {
+      args: ['-ne'],
+      systemPrompt: { mode: 'append', text: 'X' },
+      headless: true,
+      trustedParent: true
+    }
+  )
+  assert.deepEqual(parseLaunchOptions(undefined), { args: [], headless: false, trustedParent: false })
 })

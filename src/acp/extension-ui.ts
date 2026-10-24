@@ -13,6 +13,7 @@ export interface ExtensionUiHost {
   sessionId: string
   conn: AcpClient
   clientCapabilities?: ClientCapabilities
+  trustedParent?: boolean
   sendResponse(response: ExtensionUiResponse): Promise<void>
   emit(update: SessionUpdate): void | Promise<void>
   signal?: AbortSignal
@@ -73,12 +74,15 @@ export async function handleExtensionUiRequest(event: Record<string, unknown>, h
 
   try {
     if (method === 'confirm') {
-      const result = await waitForDialog(event, host, () =>
-        host.conn.requestPermission({
-          sessionId: host.sessionId,
-          toolCall: permissionToolCall(id, method, event),
-          options: CONFIRM_OPTIONS
-        })
+      const result = await waitForDialog(event, host, signal =>
+        host.conn.requestPermission(
+          {
+            sessionId: host.sessionId,
+            toolCall: permissionToolCall(id, method, event),
+            options: CONFIRM_OPTIONS
+          },
+          signal
+        )
       )
       if (result.state === 'expired') return
       if (result.state !== 'answered' || result.value.outcome.outcome !== 'selected') return await cancel()
@@ -96,13 +100,16 @@ export async function handleExtensionUiRequest(event: Record<string, unknown>, h
       }
       options = raw
       if (!host.clientCapabilities?.elicitation?.form) {
-        const result = await waitForDialog(event, host, () =>
-          host.conn.requestPermission({
-            sessionId: host.sessionId,
-            toolCall: permissionToolCall(id, method, event),
-            // Compatibility buttons only: option labels do not define authorization policy.
-            options: raw.map((name, index) => ({ optionId: `choice-${index}`, name, kind: 'allow_once' }))
-          })
+        const result = await waitForDialog(event, host, signal =>
+          host.conn.requestPermission(
+            {
+              sessionId: host.sessionId,
+              toolCall: permissionToolCall(id, method, event),
+              // Compatibility buttons only: option labels do not define authorization policy.
+              options: raw.map((name, index) => ({ optionId: `choice-${index}`, name, kind: 'allow_once' }))
+            },
+            signal
+          )
         )
         if (result.state === 'expired') return
         if (result.state !== 'answered' || result.value.outcome.outcome !== 'selected') return await cancel()
@@ -111,7 +118,7 @@ export async function handleExtensionUiRequest(event: Record<string, unknown>, h
         return await reply(value === undefined ? { id, cancelled: true } : { id, value })
       }
     } else {
-      if (!isPlainTextRequest(event)) {
+      if (!isPlainTextRequest(event, host.trustedParent === true)) {
         await unsupported(host, method, 'Sensitive or custom-schema text requests are not supported.')
         return await cancel()
       }
@@ -128,13 +135,16 @@ export async function handleExtensionUiRequest(event: Record<string, unknown>, h
       ...(method === 'input' && typeof event.placeholder === 'string' ? { description: event.placeholder } : {}),
       ...(method === 'editor' && typeof event.prefill === 'string' ? { default: event.prefill } : {})
     }
-    const result = await waitForDialog(event, host, () =>
-      host.conn.createElicitation({
-        sessionId: host.sessionId,
-        mode: 'form',
-        message: options ? title : `${title}\n\n${SECRET_DISCLOSURE}`,
-        requestedSchema: { type: 'object', properties: { value: field }, required: ['value'] }
-      })
+    const result = await waitForDialog(event, host, signal =>
+      host.conn.createElicitation(
+        {
+          sessionId: host.sessionId,
+          mode: 'form',
+          message: options ? title : `${title}\n\n${SECRET_DISCLOSURE}`,
+          requestedSchema: { type: 'object', properties: { value: field }, required: ['value'] }
+        },
+        signal
+      )
     )
     if (result.state === 'expired') return
     if (result.state !== 'answered' || !CreateElicitationResponse.isAccept(result.value)) return await cancel()
@@ -173,7 +183,7 @@ function choiceIndex(optionId: string): number | null {
   return Number.isSafeInteger(index) ? index : null
 }
 
-function isPlainTextRequest(event: Record<string, unknown>): boolean {
+function isPlainTextRequest(event: Record<string, unknown>, trustedParent: boolean): boolean {
   if (SECRET_FLAGS.some(key => event[key] !== undefined && event[key] !== null && event[key] !== false)) return false
   if (event.inputType !== undefined && event.inputType !== 'text' && event.inputType !== 'textarea') return false
   if (event.type !== undefined && event.type !== 'extension_ui_request') return false
@@ -182,7 +192,7 @@ function isPlainTextRequest(event: Record<string, unknown>): boolean {
     if (event[key] !== undefined && typeof event[key] !== 'string') return false
   }
   // Deny-only guard, not proof of non-sensitive intent: Pi has no sensitivity contract.
-  return !['title', 'message', 'placeholder'].some(key => CREDENTIAL_TEXT.test(text(event, key) ?? ''))
+  return trustedParent || !['title', 'message', 'placeholder'].some(key => CREDENTIAL_TEXT.test(text(event, key) ?? ''))
 }
 
 async function unsupported(host: ExtensionUiHost, method: string, reason: string): Promise<void> {
@@ -195,7 +205,7 @@ async function unsupported(host: ExtensionUiHost, method: string, reason: string
 function waitForDialog<T>(
   event: Record<string, unknown>,
   host: ExtensionUiHost,
-  request: () => Promise<T>
+  request: (signal: AbortSignal) => Promise<T>
 ): Promise<DialogResult<T>> {
   const signals = [...new Set([host.signal, host.conn.signal].filter((signal): signal is AbortSignal => !!signal))]
   if (signals.some(signal => signal.aborted)) return Promise.resolve({ state: 'cancelled' })
@@ -204,12 +214,14 @@ function waitForDialog<T>(
   const deadline = timeoutMs === undefined ? undefined : performance.now() + timeoutMs
 
   return new Promise(resolve => {
+    const requestController = new AbortController()
     let settled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     const finish = (result: DialogResult<T>) => {
       if (settled) return
       settled = true
       if (timer !== undefined) clearTimeout(timer)
+      if (result.state !== 'answered') requestController.abort()
       for (const signal of signals) signal.removeEventListener('abort', aborted)
       resolve(result)
     }
@@ -223,7 +235,7 @@ function waitForDialog<T>(
     // Pi resolves its dialog on timeout; only release our wait and discard late answers.
     if (timeoutMs !== undefined) timer = setTimeout(expire, Math.min(timeoutMs, 2_147_483_647))
     try {
-      request().then(
+      request(requestController.signal).then(
         value => {
           if (deadline !== undefined && performance.now() >= deadline) finish({ state: 'expired' })
           else if (signals.some(signal => signal.aborted)) finish({ state: 'cancelled' })

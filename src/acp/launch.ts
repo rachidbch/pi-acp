@@ -19,6 +19,7 @@ export type LaunchOptions = {
   args: string[]
   systemPrompt?: SystemPrompt
   headless: boolean
+  trustedParent: boolean
 }
 
 /** Allowed pi flags; `true` = the flag takes a value. Aliases are the same pi flag. */
@@ -117,7 +118,8 @@ export function parseLaunchOptions(meta: unknown): LaunchOptions {
   return {
     args: parseLaunchFlags(piAcp.launch),
     ...(systemPrompt ? { systemPrompt } : {}),
-    headless: piAcp.headless === true
+    headless: piAcp.headless === true,
+    trustedParent: piAcp.trustedParent === true
   }
 }
 
@@ -126,7 +128,8 @@ export function launchCapabilities(): Record<string, unknown> {
   return {
     launch: { flags: LAUNCH_FLAGS },
     systemPrompt: { modes: ['append', 'replace'] },
-    headless: true
+    headless: true,
+    trustedParent: true
   }
 }
 
