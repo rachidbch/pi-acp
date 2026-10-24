@@ -34,6 +34,8 @@ function stripAnsi(s: string): string {
 }
 
 type PiRpcCommand =
+  | { type: 'steer'; id?: string; message: string }
+  | { type: 'clear_queue'; id?: string }
   | { type: 'prompt'; id?: string; message: string; images?: unknown[] }
   | { type: 'abort'; id?: string }
   | { type: 'get_state'; id?: string }
@@ -602,6 +604,18 @@ export class PiRpcProcess {
       }
     )
     return disposition
+  }
+
+  async steer(message: string): Promise<PiPromptDisposition | undefined> {
+    const res = await this.request({ type: 'steer', message })
+    if (!res.success) throw new Error(`pi steer failed: ${res.error}`)
+    return (res.data as { disposition?: PiPromptDisposition } | undefined)?.disposition
+  }
+
+  async clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
+    const res = await this.request({ type: 'clear_queue' })
+    if (!res.success) throw new Error(`pi clear_queue failed: ${res.error}`)
+    return res.data as { steering: string[]; followUp: string[] }
   }
 
   async abort(): Promise<void> {

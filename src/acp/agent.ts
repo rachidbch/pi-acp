@@ -325,6 +325,7 @@ export class PiAcpAgent {
     const requested = params.protocolVersion
 
     const response: InitializeResponse = {
+      _meta: { steering: { supported: true } },
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
       agentInfo: {
         name: 'pi-acp',
@@ -1065,6 +1066,29 @@ export class PiAcpAgent {
       ...(usageOut.usage ? { usage: usageOut.usage } : {}),
       ...(usageOut.summary ? { _meta: { piAcp: usageOut.summary } } : {})
     }
+  }
+
+  async steer(params: unknown): Promise<{ outcome: 'injected' | 'promptRequired' }> {
+    const value = params as {
+      sessionId?: unknown
+      prompt?: unknown
+      _meta?: { steering?: { idleBehavior?: unknown } }
+    } | null
+    if (
+      !value ||
+      typeof value.sessionId !== 'string' ||
+      !Array.isArray(value.prompt) ||
+      !value.prompt.length ||
+      value.prompt.some(
+        block => !block || block.type !== 'text' || typeof block.text !== 'string' || !block.text.trim()
+      ) ||
+      (value._meta?.steering?.idleBehavior !== undefined && value._meta.steering.idleBehavior !== 'promptRequired')
+    ) {
+      throw RequestError.invalidParams('Steering requires non-empty text prompt and idleBehavior promptRequired')
+    }
+    const session = this.sessions.maybeGet(value.sessionId)
+    if (!session) throw RequestError.invalidParams('Unknown session')
+    return session.steer(value.prompt.map(block => block.text).join('\n'))
   }
 
   async cancel(params: CancelNotification): Promise<void> {

@@ -44,6 +44,7 @@ export function connectPiAgent(stream: Stream): { agent: PiAcpAgent; connection:
     .onRequest('session/set_mode', ctx => implementation.setSessionMode(ctx.params))
     .onRequest('session/set_config_option', ctx => implementation.setSessionConfigOption(ctx.params))
     .onRequest('session/prompt', ctx => implementation.prompt(ctx.params, ctx.signal))
+    .onRequest('_session/steering', { parse: (params: unknown) => params }, ctx => implementation.steer(ctx.params))
     .onNotification('session/cancel', ctx => implementation.cancel(ctx.params))
   const connection = app.connect(stream)
   return { agent: implementation, connection }

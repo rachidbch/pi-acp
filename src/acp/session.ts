@@ -8,6 +8,7 @@ import type {
   ToolKind
 } from '@agentclientprotocol/sdk/unstable'
 import { RequestError } from '@agentclientprotocol/sdk/unstable'
+import { Steering } from './steering.js'
 import { randomUUID } from 'node:crypto'
 import type { AcpClient } from './connection.js'
 import { readFileSync } from 'node:fs'
@@ -387,6 +388,14 @@ export class PiAcpSession {
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
   private cancelRequested = false
+  private readonly steering = new Steering(text => this.proc.steer(text))
+  private steeringReplay: string[] = []
+
+  async steer(text: string): Promise<{ outcome: 'injected' | 'promptRequired' }> {
+    if (!this.pendingTurn || this.cancelRequested) return { outcome: 'promptRequired' }
+    await this.steering.inject(text)
+    return { outcome: 'injected' }
+  }
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
@@ -648,6 +657,9 @@ export class PiAcpSession {
   async cancel(): Promise<void> {
     // Cancel current and clear any queued prompts.
     this.cancelRequested = true
+    this.steering.clear()
+    this.steeringReplay = []
+    if (typeof this.proc.clearQueue === 'function') await this.proc.clearQueue()
     this.interactions.abort()
     this.finishOutstandingTools('Cancelled.')
 
@@ -767,6 +779,26 @@ export class PiAcpSession {
     this.inAgentLoop = false
     const turn = this.pendingTurn
     if (turn) {
+      if (!this.cancelRequested && typeof this.proc.clearQueue === 'function') {
+        const replay = await this.steering.leftovers(() => this.proc.clearQueue())
+        if (this.pendingTurn !== turn) return
+        this.steeringReplay.push(...replay)
+        const next = this.steeringReplay.shift()
+        if (next !== undefined && !this.cancelRequested) {
+          this.steering.start()
+          void this.proc
+            .prompt(next)
+            .then(disposition => {
+              if (disposition === 'handled') void this.settleTurn()
+            })
+            .catch(err => {
+              turn.outcome = 'error'
+              turn.errorMessage = String(err)
+              void this.completeTurn(turn)
+            })
+          return
+        }
+      }
       turn.settled = true
       if (turn.acknowledged) await this.completeTurn(turn)
     } else {
@@ -895,6 +927,7 @@ export class PiAcpSession {
   }
 
   private startTurn(t: QueuedTurn): void {
+    this.steering.start()
     this.cancelRequested = false
     this.inAgentLoop = false
     this.activeMessageId = undefined
@@ -1411,6 +1444,7 @@ export class PiAcpSession {
 
       case 'agent_start': {
         this.inAgentLoop = true
+        void this.steering.running()
         break
       }
 
@@ -1421,6 +1455,7 @@ export class PiAcpSession {
       }
 
       case 'agent_end': {
+        this.steering.ended()
         // One low-level run ended. Pi may still retry, compact, or process a queued
         // continuation, so keep the ACP turn open until `agent_settled`.
         this.inAgentLoop = false
