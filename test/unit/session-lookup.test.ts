@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
-import { findPiSessionFile, getPiSessionDirForCwd } from '../../src/acp/pi-sessions.js'
+import { findPiSessionFile, getPiSessionDirForCwd, readPiSessionTitle } from '../../src/acp/pi-sessions.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 import { piSessionDir, writePiSession } from '../helpers/session-files.js'
@@ -34,16 +34,31 @@ test('session dir: PI_CODING_AGENT_SESSION_DIR, then settings sessionDir (both f
   assert.equal(getPiSessionDirForCwd('/work/app'), join(root, 'sessions', '--work-app--'))
 })
 
-test('findPiSessionFile matches the id suffix in one directory only', () => {
+test('findPiSessionFile matches the id suffix in one directory only, asynchronously', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-acp-findfile-'))
   const dir = join(root, 'dir')
   const file = writePiSession(dir, 'abc-123', '/w')
   writePiSession(dir, 'xabc-123', '/w')
   mkdirSync(join(dir, 'nested'))
   writePiSession(join(dir, 'nested'), 'deep', '/w')
-  assert.equal(findPiSessionFile(dir, 'abc-123'), file)
-  assert.equal(findPiSessionFile(dir, 'deep'), null)
-  assert.equal(findPiSessionFile(join(root, 'absent'), 'abc-123'), null)
+  // Lookup sits on the load/resume hot path: it must resolve, never block on sync FS.
+  const pending = findPiSessionFile(dir, 'abc-123')
+  assert.equal(typeof (pending as { then?: unknown })?.then, 'function')
+  assert.equal(await pending, file)
+  assert.equal(await findPiSessionFile(dir, 'deep'), null)
+  assert.equal(await findPiSessionFile(join(root, 'absent'), 'abc-123'), null)
+})
+
+test('readPiSessionTitle resolves asynchronously (no sync FS on the lookup path)', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-acp-title-'))
+  withEnv(t, { PI_CODING_AGENT_DIR: root })
+  const dir = piSessionDir(root, '/w')
+  const file = writePiSession(dir, 'titled', '/w', [
+    { type: 'session_info', id: 'n1', timestamp: '2026-01-01T00:00:01.000Z', name: 'My Named Session' }
+  ])
+  const pending = readPiSessionTitle(file)
+  assert.equal(typeof (pending as { then?: unknown })?.then, 'function')
+  assert.equal(await pending, 'My Named Session')
 })
 
 for (const method of ['loadSession', 'resumeSession'] as const) {

@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, statSync, openSync, readSync, closeSync, existsSync } from 'node:fs'
+import { open as openAsync, readFile as readFileAsync, readdir as readdirAsync } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve, isAbsolute } from 'node:path'
 import { promptToSessionTitle } from './translate/prompt.js'
@@ -70,9 +71,11 @@ export function getPiSessionDirForCwd(cwd: string): string {
 }
 
 /** pi names session files `<timestamp>_<id>.jsonl`; reads one directory, never scans. */
-export function findPiSessionFile(dir: string, sessionId: string): string | null {
+export async function findPiSessionFile(dir: string, sessionId: string): Promise<string | null> {
   try {
-    const name = readdirSync(dir).find(f => f.endsWith(`_${sessionId}.jsonl`))
+    // Async: load/resume sit on the parent-driven hot path and must not block the loop.
+    const names = await readdirAsync(dir)
+    const name = names.find(f => f.endsWith(`_${sessionId}.jsonl`))
     return name ? join(dir, name) : null
   } catch {
     return null
@@ -168,62 +171,22 @@ function pickTitleFromTail(tail: string): string | null {
   return null
 }
 
-function scanSessionInfoNameFromFile(path: string): string | null {
-  // Fallback when the session_info entry is older than our tail window.
-  // Scan the whole file line-by-line and remember the last session_info.name.
-  const fd = openSync(path, 'r')
-  try {
-    const buf = Buffer.alloc(256 * 1024)
-    let leftover = ''
-    let offset = 0
-    let lastName: string | null = null
-
-    while (true) {
-      const n = readSync(fd, buf, 0, buf.length, offset)
-      if (n <= 0) break
-      offset += n
-
-      const chunk = leftover + buf.subarray(0, n).toString('utf8')
-      const lines = chunk.split(/\r?\n/)
-      leftover = lines.pop() ?? ''
-
-      for (const line0 of lines) {
-        const line = line0.trim()
-        if (!line) continue
-        try {
-          const obj = JSON.parse(line) as any
-          if (obj?.type === 'session_info' && typeof obj?.name === 'string') {
-            lastName = obj.name.trim()
-          }
-        } catch {
-          // ignore
-        }
-      }
-    }
-
-    // Best-effort: parse leftover if it was a full line without trailing newline.
-    const tailLine = leftover.trim()
-    if (tailLine) {
-      try {
-        const obj = JSON.parse(tailLine) as any
-        if (obj?.type === 'session_info' && typeof obj?.name === 'string') {
-          lastName = obj.name.trim()
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    return lastName
-  } catch {
-    return null
-  } finally {
+/** The last `session_info.name` in the text, oldest to newest. */
+function scanSessionInfoName(text: string): string | null {
+  let lastName: string | null = null
+  for (const line0 of text.split(/\r?\n/)) {
+    const line = line0.trim()
+    if (!line) continue
     try {
-      closeSync(fd)
+      const obj = JSON.parse(line) as any
+      if (obj?.type === 'session_info' && typeof obj?.name === 'string') {
+        lastName = obj.name.trim()
+      }
     } catch {
       // ignore
     }
   }
+  return lastName
 }
 
 function pickUpdatedAtFromTail(tail: string): string | null {
@@ -265,52 +228,76 @@ function pickUpdatedAtFromTail(tail: string): string | null {
   return null
 }
 
-function pickFallbackTitleFromHead(path: string): string | null {
-  // Fallback to first user message.
-  try {
-    const raw = readFileSync(path, { encoding: 'utf8' })
-    const lines = raw.split(/\r?\n/)
-    for (const line0 of lines.slice(0, 2000)) {
-      const line = line0.trim()
-      if (!line) continue
-      try {
-        const obj = JSON.parse(line) as any
-        if (obj?.type === 'message' && obj?.message?.role === 'user') {
-          const content = obj?.message?.content
-          if (typeof content === 'string') {
-            const title = promptToSessionTitle([{ type: 'text', text: content }])
-            if (title) return title
-          }
-          if (Array.isArray(content)) {
-            const title = promptToSessionTitle(
-              content.filter(
-                (block: unknown): block is { type: 'text'; text: string } =>
-                  typeof block === 'object' &&
-                  block !== null &&
-                  'type' in block &&
-                  block.type === 'text' &&
-                  'text' in block &&
-                  typeof block.text === 'string'
-              )
-            )
-            if (title) return title
-          }
+/** The first user-message-derived title in the text. */
+function fallbackTitleFromHeadText(raw: string): string | null {
+  const lines = raw.split(/\r?\n/)
+  for (const line0 of lines.slice(0, 2000)) {
+    const line = line0.trim()
+    if (!line) continue
+    try {
+      const obj = JSON.parse(line) as any
+      if (obj?.type === 'message' && obj?.message?.role === 'user') {
+        const content = obj?.message?.content
+        if (typeof content === 'string') {
+          const title = promptToSessionTitle([{ type: 'text', text: content }])
+          if (title) return title
         }
-      } catch {
-        // ignore
+        if (Array.isArray(content)) {
+          const title = promptToSessionTitle(
+            content.filter(
+              (block: unknown): block is { type: 'text'; text: string } =>
+                typeof block === 'object' && block !== null && 'type' in block && block.type === 'text' && 'text' in block
+            )
+          )
+          if (title) return title
+        }
       }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
 
   return null
 }
 
-export function readPiSessionTitle(path: string, tail?: string): string | null {
+async function readTailAsync(path: string, tailBytes = DEFAULT_TAIL_BYTES): Promise<string> {
+  const handle = await openAsync(path, 'r')
   try {
-    const name = pickTitleFromTail(tail ?? readTail(path)) ?? scanSessionInfoNameFromFile(path)
-    return name || pickFallbackTitleFromHead(path)
+    const st = await handle.stat()
+    const start = Math.max(0, st.size - tailBytes)
+    const len = st.size - start
+    const buf = Buffer.alloc(len)
+    const { bytesRead } = await handle.read(buf, 0, len, start)
+    return buf.subarray(0, bytesRead).toString('utf-8')
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+/**
+ * The session's title, from the newest `session_info.name`, else the first user message.
+ * Async so the load/resume lookup path never blocks on sync FS.
+ */
+export async function readPiSessionTitle(path: string, tail?: string): Promise<string | null> {
+  try {
+    const tailText = tail ?? (await readTailAsync(path))
+    const named = pickTitleFromTail(tailText)
+    if (named) return named
+    const raw = await readFileAsync(path, { encoding: 'utf8' })
+    // A cleared name ('') is no title: fall through, matching the sync variant's `||`.
+    return scanSessionInfoName(raw) || fallbackTitleFromHeadText(raw)
+  } catch {
+    return null
+  }
+}
+
+/** Sync variant for `session/list`, which is off the load and resume path. */
+function readPiSessionTitleSync(path: string, tail?: string): string | null {
+  try {
+    const named = pickTitleFromTail(tail ?? readTail(path))
+    if (named) return named
+    const raw = readFileSync(path, { encoding: 'utf8' })
+    return scanSessionInfoName(raw) || fallbackTitleFromHeadText(raw)
   } catch {
     return null
   }
@@ -334,7 +321,7 @@ export function listPiSessions(): PiSessionListItem[] {
     let title: string | null = null
     try {
       const tail = readTail(file)
-      title = readPiSessionTitle(file, tail)
+      title = readPiSessionTitleSync(file, tail)
       updatedAt = pickUpdatedAtFromTail(tail)
     } catch {
       // ignore

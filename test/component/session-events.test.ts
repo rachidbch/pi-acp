@@ -559,7 +559,7 @@ test('PiAcpSession: emits edit tool line when oldText matches uniquely', async (
   mkdirSync(cwd, { recursive: true })
   writeFileSync(filePath, 'one\ntwo\nneedle\nthree\n', 'utf8')
 
-  new PiAcpSession({
+  const session = new PiAcpSession({
     sessionId: 's1',
     cwd,
     mcpServers: [],
@@ -575,7 +575,7 @@ test('PiAcpSession: emits edit tool line when oldText matches uniquely', async (
     args: { path: 'a.txt', oldText: 'needle' }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   assert.equal(conn.updates.length, 1)
   assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
@@ -591,7 +591,7 @@ test('PiAcpSession: emits edit tool line from edits array when oldText matches u
   mkdirSync(cwd, { recursive: true })
   writeFileSync(filePath, 'one\ntwo\nneedle\nthree\n', 'utf8')
 
-  new PiAcpSession({
+  const session = new PiAcpSession({
     sessionId: 's1',
     cwd,
     mcpServers: [],
@@ -607,7 +607,7 @@ test('PiAcpSession: emits edit tool line from edits array when oldText matches u
     args: { path: 'a.txt', edits: [{ oldText: 'needle', newText: 'replacement' }] }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   assert.equal(conn.updates.length, 1)
   assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
@@ -623,7 +623,7 @@ test('PiAcpSession: emits edit tool line from stringified edits array', async ()
   mkdirSync(cwd, { recursive: true })
   writeFileSync(filePath, 'one\ntwo\nneedle\nthree\n', 'utf8')
 
-  new PiAcpSession({
+  const session = new PiAcpSession({
     sessionId: 's1',
     cwd,
     mcpServers: [],
@@ -639,7 +639,7 @@ test('PiAcpSession: emits edit tool line from stringified edits array', async ()
     args: { path: 'a.txt', edits: JSON.stringify([{ oldText: 'needle', newText: 'replacement' }]) }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   assert.equal(conn.updates.length, 1)
   assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
@@ -655,7 +655,7 @@ test('PiAcpSession: omits edit tool line when oldText matches multiple times', a
   mkdirSync(cwd, { recursive: true })
   writeFileSync(filePath, 'one\nneedle\ntwo\nneedle\n', 'utf8')
 
-  new PiAcpSession({
+  const session = new PiAcpSession({
     sessionId: 's1',
     cwd,
     mcpServers: [],
@@ -671,7 +671,7 @@ test('PiAcpSession: omits edit tool line when oldText matches multiple times', a
     args: { path: 'a.txt', oldText: 'needle' }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   assert.equal(conn.updates.length, 1)
   assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')

@@ -11,7 +11,7 @@ import { RequestError } from '@agentclientprotocol/sdk/unstable'
 import { Steering } from './steering.js'
 import { randomUUID } from 'node:crypto'
 import type { AcpClient } from './connection.js'
-import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import {
   PiRpcProcess,
@@ -117,6 +117,24 @@ function emptySummary(): TurnSummary {
     compactions: 0,
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
   }
+}
+
+/**
+ * The turn's spend on an ACP `usage_update`: pi's per-turn cost (USD, `docs/models-configuration.md`)
+ * plus the token breakdown parents read off acpx `status` events (`_meta.usage`, acpx runtime
+ * `normalizeUsageBreakdown`). Null when pi reported nothing, so stubbed turns stay silent.
+ */
+function toCostUsageUpdate(usage: TurnSummary['usage']): SessionUpdate | null {
+  const { input, output, cacheRead, cacheWrite, cost } = usage
+  const reported = [input, output, cacheRead, cacheWrite, cost].some(v => Number.isFinite(v) && v > 0)
+  if (!reported) return null
+  return {
+    sessionUpdate: 'usage_update',
+    // `used`/`size` describe context occupancy and travel on the separate context usage_update;
+    // this one carries what spend-accumulating parents read: `cost` and the `_meta.usage` breakdown.
+    ...(cost > 0 ? { cost: { amount: cost, currency: 'USD' } } : {}),
+    _meta: { usage: { inputTokens: input, outputTokens: output, cachedReadTokens: cacheRead, cachedWriteTokens: cacheWrite } }
+  } as unknown as SessionUpdate
 }
 
 function addMessageUsage(summary: TurnSummary, usage: unknown): void {
@@ -440,6 +458,8 @@ export class PiAcpSession {
   private unsubscribe: (() => void) | undefined
   private keepaliveTimer: NodeJS.Timeout | null = null
   private lastUpdateSentAt = Date.now()
+  /** Serialized pi-event handling; events are never processed out of order. */
+  private eventChain: Promise<void> = Promise.resolve()
 
   constructor(opts: {
     sessionId: string
@@ -466,8 +486,11 @@ export class PiAcpSession {
     this.headless = opts.headless === true
     this.trustedParent = opts.trustedParent === true
 
+    // Events are handled one at a time so per-event async work (file snapshots) can
+    // never reorder the emitted updates.
     this.unsubscribe = this.proc.onEvent(ev => {
-      if (!this.disposed) this.handlePiEvent(ev)
+      if (this.disposed) return
+      this.eventChain = this.eventChain.then(() => this.handlePiEvent(ev)).catch(() => {})
     })
   }
 
@@ -507,24 +530,34 @@ export class PiAcpSession {
     this.manualCompaction = true
     this.cancelRequested = false
     const version = this.compactionVersion
-    this.handlePiEvent({ type: 'compaction_start', reason: 'manual' })
+    // Compaction events share the pi-event chain so native and manual lifecycle events
+    // stay ordered (the version check below relies on it).
+    this.eventChain = this.eventChain
+      .then(() => this.handlePiEvent({ type: 'compaction_start', reason: 'manual' }))
+      .catch(() => {})
     this.ensureKeepalive()
     try {
       const result = await this.proc.compact(customInstructions)
+      await this.eventChain
       if (this.compactionVersion === version)
-        this.handlePiEvent({ type: 'compaction_end', reason: 'manual', result, aborted: signal?.aborted === true })
+        await this.eventChain.then(() =>
+          this.handlePiEvent({ type: 'compaction_end', reason: 'manual', result, aborted: signal?.aborted === true })
+        )
       await this.flushEmits()
       return signal?.aborted || this.cancelRequested || this.disposalReason === 'cancelled' || this.compactionCancelled
         ? { cancelled: true }
         : { cancelled: false, result }
     } catch (error) {
+      await this.eventChain
       if (this.compactionVersion === version) {
-        this.handlePiEvent({
-          type: 'compaction_end',
-          reason: 'manual',
-          aborted: signal?.aborted === true || this.cancelRequested || this.disposalReason === 'cancelled',
-          errorMessage: error instanceof Error ? error.message : String(error)
-        })
+        await this.eventChain.then(() =>
+          this.handlePiEvent({
+            type: 'compaction_end',
+            reason: 'manual',
+            aborted: signal?.aborted === true || this.cancelRequested || this.disposalReason === 'cancelled',
+            errorMessage: error instanceof Error ? error.message : String(error)
+          })
+        )
       }
       await this.flushEmits()
       if (signal?.aborted || this.cancelRequested || this.disposalReason === 'cancelled' || this.compactionCancelled)
@@ -605,8 +638,14 @@ export class PiAcpSession {
       if (this.pendingTurn?.queued === queued) {
         this.cancelRequested = true
         this.interactions.abort()
-        this.finishOutstandingTools('Cancelled.')
-        void this.proc.abort().catch(() => {})
+        // Finish tools against the event state as of every pi event received so far.
+        void this.eventChain
+          .catch(() => {})
+          .then(() => {
+            if (this.pendingTurn?.queued !== queued) return
+            this.finishOutstandingTools('Cancelled.')
+            void this.proc.abort().catch(() => {})
+          })
       } else {
         const index = this.turnQueue.indexOf(queued)
         if (index < 0) return
@@ -665,6 +704,8 @@ export class PiAcpSession {
     this.steering.clear()
     this.steeringReplay = []
     this.interactions.abort()
+    // Tool state must reflect every pi event received so far, queued ones included.
+    await this.eventChain.catch(() => {})
     this.finishOutstandingTools('Cancelled.')
 
     if (this.turnQueue.length) {
@@ -762,6 +803,11 @@ export class PiAcpSession {
     await this.lastEmit
   }
 
+  /** Resolves once every pi event received so far has been handled and its updates delivered. */
+  afterEvents(): Promise<void> {
+    return this.eventChain.then(() => this.flushEmits())
+  }
+
   /**
    * Best-effort: publish the real pi context-window occupancy as ACP `usage_update`.
    * Queued updates are flushed even when the stats query fails or times out, so callers
@@ -834,9 +880,15 @@ export class PiAcpSession {
   private async completeTurn(turn: PendingTurn): Promise<void> {
     if (this.pendingTurn !== turn || turn.completing || !turn.acknowledged) return
     turn.completing = true
+    // Finish against the event state as of every pi event received so far.
+    await this.eventChain.catch(() => {})
+    if (this.pendingTurn !== turn || !turn.acknowledged) return
     // pi aborts on its own too (settled with aborted:true): still cancelled, flagged in the summary.
     const cancelled = this.cancelRequested || turn.outcome === 'cancelled' || turn.summary.aborted
     this.finishOutstandingTools(this.cancelRequested ? 'Cancelled.' : 'Turn ended before the tool completed.')
+    // Per-turn spend lands before the context snapshot, both before the prompt resolves.
+    const costUpdate = toCostUsageUpdate(turn.summary.usage)
+    if (costUpdate) this.emit(costUpdate)
     // Ensure all updates derived from pi events (plus the final usage update) are
     // delivered before we resolve the ACP `session/prompt` request.
     const postStats = await this.publishContextUsage()
@@ -1086,7 +1138,7 @@ export class PiAcpSession {
     }
   }
 
-  private handlePiEvent(ev: PiRpcEvent) {
+  private async handlePiEvent(ev: PiRpcEvent) {
     const type = String((ev as any).type ?? '')
     const toolCallId = typeof ev.toolCallId === 'string' ? ev.toolCallId : undefined
     if (type.startsWith('tool_execution_') && toolCallId && this.terminalToolCalls.has(toolCallId)) return
@@ -1178,8 +1230,10 @@ export class PiAcpSession {
             // ...and always includes it in the partial assistant message at contentIndex
             (ame as any)?.partial?.content?.[(ame as any)?.contentIndex ?? 0]
 
-          const toolCallId = String((toolCall as any)?.id ?? '')
-          const toolName = String((toolCall as any)?.name ?? 'tool')
+          // pi 1.4 puts `id` and `toolName` on the event itself (`docs/json.md`); at start the
+          // partial message may not carry the tool call object yet, so the event fields lead.
+          const toolCallId = String((ame as any).id ?? (toolCall as any)?.id ?? '')
+          const toolName = String((ame as any).toolName ?? (toolCall as any)?.name ?? 'tool')
 
           if (toolCallId) {
             if (this.terminalToolCalls.has(toolCallId)) break
@@ -1275,7 +1329,7 @@ export class PiAcpSession {
           if (p) {
             try {
               const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
-              snapshotOldText = readFileSync(abs, 'utf8')
+              snapshotOldText = await readFile(abs, 'utf8')
               this.fileSnapshots.set(toolCallId, { path: p, oldText: snapshotOldText })
 
               if (toolName === 'edit') {
@@ -1366,7 +1420,7 @@ export class PiAcpSession {
         if (!isError && snapshot) {
           try {
             const abs = isAbsolute(snapshot.path) ? snapshot.path : resolvePath(this.cwd, snapshot.path)
-            const newText = readFileSync(abs, 'utf8')
+            const newText = await readFile(abs, 'utf8')
             if (snapshot.oldText === null || newText !== snapshot.oldText) {
               hasStructuredDiff = true
               content = [

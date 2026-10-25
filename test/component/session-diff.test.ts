@@ -11,7 +11,7 @@ function createSession(cwd: string) {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
-  new PiAcpSession({
+  const session = new PiAcpSession({
     sessionId: 's1',
     cwd,
     mcpServers: [],
@@ -20,7 +20,7 @@ function createSession(cwd: string) {
     fileCommands: []
   })
 
-  return { conn, proc }
+  return { conn, proc, session }
 }
 
 function completedToolUpdate(conn: FakeAgentSideConnection, toolCallId = 't1') {
@@ -38,9 +38,11 @@ test('PiAcpSession: emits ACP diff content for edit tool from actual before/afte
   const filePath = join(dir, 'a.txt')
   writeFileSync(filePath, 'before\n', 'utf8')
 
-  const { conn, proc } = createSession(dir)
+  const { conn, proc, session } = createSession(dir)
 
   proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'edit', args: { path: 'a.txt' } })
+  // The snapshot read is async: let it see the pre-write contents, like a real tool run.
+  await session.afterEvents()
   writeFileSync(filePath, 'after\n', 'utf8')
   proc.emit({
     type: 'tool_execution_end',
@@ -49,7 +51,7 @@ test('PiAcpSession: emits ACP diff content for edit tool from actual before/afte
     result: { content: [{ type: 'text', text: 'ok' }] }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   const end = completedToolUpdate(conn)
   assert.ok(end, 'expected completed tool_call_update')
@@ -70,7 +72,7 @@ test('PiAcpSession: does not turn requested edit args into finalized ACP diffs a
   const filePath = join(dir, 'a.txt')
   writeFileSync(filePath, 'before\n', 'utf8')
 
-  const { conn, proc } = createSession(dir)
+  const { conn, proc, session } = createSession(dir)
 
   proc.emit({
     type: 'tool_execution_start',
@@ -79,7 +81,7 @@ test('PiAcpSession: does not turn requested edit args into finalized ACP diffs a
     args: { path: 'a.txt', edits: [{ oldText: 'before', newText: 'after' }] }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   const start = conn.updates.find(u => (u.update as any).toolCallId === 't1' && u.update.sessionUpdate === 'tool_call')
   assert.ok(start, 'expected tool_call for edit start')
@@ -93,7 +95,7 @@ test('PiAcpSession: does not turn requested edit args into finalized ACP diffs a
     result: { content: [{ type: 'text', text: 'ok' }] }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   const end = completedToolUpdate(conn)
   assert.ok(end, 'expected completed tool_call_update')
@@ -109,7 +111,7 @@ test('PiAcpSession: edit diff uses realized fuzzy-match file contents instead of
   const filePath = join(dir, 'fuzzy.txt')
   writeFileSync(filePath, 'FULLWIDTH: ＡＢＣ１２３\n', 'utf8')
 
-  const { conn, proc } = createSession(dir)
+  const { conn, proc, session } = createSession(dir)
 
   proc.emit({
     type: 'tool_execution_start',
@@ -121,6 +123,8 @@ test('PiAcpSession: edit diff uses realized fuzzy-match file contents instead of
     }
   })
 
+  // Snapshot first (pre-write), then realize the mutation, like a real tool run.
+  await session.afterEvents()
   writeFileSync(filePath, 'FULLWIDTH: ascii replacement\n', 'utf8')
   proc.emit({
     type: 'tool_execution_end',
@@ -129,7 +133,7 @@ test('PiAcpSession: edit diff uses realized fuzzy-match file contents instead of
     result: { content: [{ type: 'text', text: 'Successfully replaced 1 block(s) in fuzzy.txt.' }] }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   const end = completedToolUpdate(conn)
   assert.ok(end, 'expected completed tool_call_update')
@@ -145,7 +149,7 @@ test('PiAcpSession: emits write diff content from actual before/after file conte
   const filePath = join(dir, 'a.txt')
   writeFileSync(filePath, 'before\n', 'utf8')
 
-  const { conn, proc } = createSession(dir)
+  const { conn, proc, session } = createSession(dir)
 
   proc.emit({
     type: 'tool_execution_start',
@@ -154,7 +158,7 @@ test('PiAcpSession: emits write diff content from actual before/after file conte
     args: { path: 'a.txt', content: 'after\n' }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   const start = conn.updates.find(u => (u.update as any).toolCallId === 't1' && u.update.sessionUpdate === 'tool_call')
   assert.ok(start, 'expected tool_call for write start')
@@ -168,7 +172,7 @@ test('PiAcpSession: emits write diff content from actual before/after file conte
     result: { content: [{ type: 'text', text: 'Successfully wrote 6 bytes to a.txt' }] }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   const end = completedToolUpdate(conn)
   assert.ok(end, 'expected completed tool_call_update')
@@ -185,7 +189,7 @@ test('PiAcpSession: emits write diff content for new files on completion', async
   mkdirSync(dir, { recursive: true })
   const filePath = join(dir, 'new.txt')
 
-  const { conn, proc } = createSession(dir)
+  const { conn, proc, session } = createSession(dir)
 
   proc.emit({
     type: 'tool_execution_start',
@@ -194,6 +198,8 @@ test('PiAcpSession: emits write diff content for new files on completion', async
     args: { path: 'new.txt', content: 'created\n' }
   })
 
+  // Snapshot first (file absent), then create it, like a real tool run.
+  await session.afterEvents()
   writeFileSync(filePath, 'created\n', 'utf8')
   proc.emit({
     type: 'tool_execution_end',
@@ -202,7 +208,7 @@ test('PiAcpSession: emits write diff content for new files on completion', async
     result: { content: [{ type: 'text', text: 'Successfully wrote 8 bytes to new.txt' }] }
   })
 
-  await new Promise(r => setTimeout(r, 0))
+  await session.afterEvents()
 
   const end = completedToolUpdate(conn)
   assert.ok(end, 'expected completed tool_call_update')

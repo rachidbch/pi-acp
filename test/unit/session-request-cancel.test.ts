@@ -48,7 +48,8 @@ test('active request cancellation finishes tools once and ignores late tool even
   const prompt = session.prompt('work', [], undefined, controller.signal)
   proc.emit({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: {} })
   controller.abort()
-  await Promise.resolve()
+  // The abort follows the received-event drain (a few microtasks on this sync-event path).
+  for (let i = 0; i < 50 && proc.abortCount === 0; i++) await Promise.resolve()
   assert.equal(proc.abortCount, 1)
   proc.emit({
     type: 'tool_execution_end',

@@ -69,7 +69,6 @@ test(
     proc.emit({ type: 'agent_settled' })
 
     const response = (await responsePromise) as { stopReason: string; usage?: { totalTokens: number } }
-    console.error('DEBUG updates:', JSON.stringify(updates.map(u => u.sessionUpdate)))
     assert.equal(response.stopReason, 'end_turn')
     assert.equal(response.usage?.totalTokens, 500)
 

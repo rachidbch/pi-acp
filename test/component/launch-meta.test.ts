@@ -140,11 +140,15 @@ test('headless: no banner or text notices in the stream; prompt result carries t
 })
 
 test('not headless: the startup banner still reaches the stream', async t => {
+  // Version probes may find nothing in a sandbox; the banner's content sections carry the signal.
+  const promptsDir = join(scratch, '.pi', 'agent', 'prompts')
+  mkdirSync(promptsDir, { recursive: true })
+  writeFileSync(join(promptsDir, 'demo.md'), 'demo prompt body')
   const { agent, conn } = await newAgent(t)
   await agent.newSession({ cwd: scratch, mcpServers: [] } as any)
   await new Promise(r => setTimeout(r, 50))
   const banner = conn.updates.some(
-    (u: any) => u.update.sessionUpdate === 'agent_message_chunk' && /pi/i.test(u.update.content?.text ?? '')
+    (u: any) => u.update.sessionUpdate === 'agent_message_chunk' && /\/demo/.test(u.update.content?.text ?? '')
   )
   assert.ok(banner)
 })

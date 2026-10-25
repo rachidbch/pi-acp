@@ -14,8 +14,14 @@ class LifecycleProcess extends FakePiRpcProcess {
   historyReads = 0
   fileAtDispose = false
 
-  constructor(private readonly file: string) {
+  constructor(
+    private readonly file: string,
+    config?: { failNextConfiguration?: boolean }
+  ) {
     super()
+    // Read at spawn time: tests flip this before starting a resume, since the session
+    // lookup (and with it the spawn) is async.
+    if (config?.failNextConfiguration) this.failConfiguration = true
   }
 
   override async getState() {
@@ -47,10 +53,11 @@ function fixture(t: TestContext) {
   const agent = new PiAcpAgent(asAgentConn(conn))
   const cwds = Reflect.get(agent, 'cwds') as Map<string, string>
   const processes: LifecycleProcess[] = []
+  const config = { failNextConfiguration: false }
   const calls: Parameters<typeof PiRpcProcess.spawn>[0][] = []
   const spawn = t.mock.method(PiRpcProcess, 'spawn', async (opts: Parameters<typeof PiRpcProcess.spawn>[0]) => {
     calls.push(opts)
-    const proc = new LifecycleProcess(file)
+    const proc = new LifecycleProcess(file, config)
     processes.push(proc)
     return proc as unknown as PiRpcProcess
   })
@@ -61,7 +68,7 @@ function fixture(t: TestContext) {
     if (previousSessionDir === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR
     else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessionDir
   })
-  return { root, file, cwds, conn, agent, processes, calls }
+  return { root, file, cwds, conn, agent, processes, calls, config }
 }
 
 test('lifecycle capabilities advertise resume and close', async t => {
@@ -116,9 +123,12 @@ test('resume validates cwd and unknown IDs without spawning', async t => {
 })
 
 test('failed resume configuration closes only a newly restored process and preserves persistence', async t => {
-  const { agent, root, file, processes, cwds } = fixture(t)
+  const { agent, root, file, processes, cwds, config } = fixture(t)
+  // The flag is read at spawn time: set it before the resume, clear it for the retry.
+  config.failNextConfiguration = true
   const first = agent.resumeSession({ sessionId: 'lifecycle', cwd: root })
-  processes[0]!.failConfiguration = true
+  await assert.rejects(first, /configuration failed/)
+  config.failNextConfiguration = false
   await assert.rejects(first, /configuration failed/)
   assert.equal(processes[0]?.disposeCount, 1)
   assert.equal(existsSync(file), true)

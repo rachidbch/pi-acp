@@ -192,6 +192,8 @@ test('steering cancel waits for in-flight injection before clearing pi queue and
   try {
     const result = session.prompt('original')
     proc.emit({ type: 'agent_start' })
+    // agent_start is handled off the event chain: drain it so the steer sees a running turn.
+    await session.afterEvents()
     const inject = session.steer('pending')
     const cancel = session.cancel()
     release()

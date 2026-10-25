@@ -75,7 +75,10 @@ for (const mode of ['load', 'prompt'] as const) {
         // A prompt restores a session this adapter already knows (loaded, then closed or crashed).
         Reflect.get(agent, 'cwds').set('restored', root)
         const prompt = agent.prompt({ sessionId: 'restored', prompt: [{ type: 'text', text: 'Continue work' }] })
-        await new Promise(resolve => setImmediate(resolve))
+        // Restore is async (session lookup reads files off the hot path): wait for the turn
+        // to actually reach pi before scripting its settle.
+        for (let i = 0; i < 200 && proc.prompts.length === 0; i++) await new Promise(r => setTimeout(r, 5))
+        assert.equal(proc.prompts.length, 1, 'prompt must reach the pi process')
         proc.emit({ type: 'agent_settled' })
         assert.equal((await prompt).stopReason, 'end_turn')
       }

@@ -56,10 +56,11 @@ import { launchCapabilities, parseLaunchOptions, type LaunchOptions } from './la
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
-import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from 'node:fs'
+import { rm, unlink } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
 import type { AvailableCommand } from '@agentclientprotocol/sdk/unstable'
 import { join, dirname, basename } from 'node:path'
-import { spawnSync } from 'node:child_process'
 import { isDeepStrictEqual } from 'node:util'
 
 type AdvertisedModel = {
@@ -214,17 +215,17 @@ export class PiAcpAgent {
     void _config
   }
 
-  private cleanupFailedNewSession(sessionId: string, state?: any | null): void {
+  private async cleanupFailedNewSession(sessionId: string, state?: any | null): Promise<void> {
     this.sessions.close(sessionId)
 
     const sessionFile =
       typeof state?.sessionFile === 'string' && state.sessionFile.trim()
         ? state.sessionFile
-        : this.locateSessionFile(sessionId, this.cwds.get(sessionId))
+        : await this.locateSessionFile(sessionId, this.cwds.get(sessionId))
 
     if (typeof sessionFile === 'string' && sessionFile.trim()) {
       try {
-        if (existsSync(sessionFile)) unlinkSync(sessionFile)
+        await rm(sessionFile, { force: true })
       } catch {
         // ignore cleanup failures; the auth/internal error is the primary result
       }
@@ -233,13 +234,13 @@ export class PiAcpAgent {
     this.cwds.delete(sessionId)
   }
 
-  private locateSessionFile(sessionId: string, cwd: string | undefined): string | null {
+  private async locateSessionFile(sessionId: string, cwd: string | undefined): Promise<string | null> {
     return cwd ? findPiSessionFile(getPiSessionDirForCwd(cwd), sessionId) : null
   }
 
   /** The session's file, or an error naming the id and the directory searched. */
-  private requireSessionFile(sessionId: string, cwd: string): string {
-    const file = this.locateSessionFile(sessionId, cwd)
+  private async requireSessionFile(sessionId: string, cwd: string): Promise<string> {
+    const file = await this.locateSessionFile(sessionId, cwd)
     if (file) return file
     const dir = getPiSessionDirForCwd(cwd)
     throw RequestError.invalidParams({ sessionId, dir }, `No pi session file for session ${sessionId} in ${dir}`)
@@ -259,7 +260,7 @@ export class PiAcpAgent {
     const restorePromise = (async () => {
       const cwd = opts?.cwd ?? this.cwds.get(sessionId)
       if (!cwd) throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
-      const sessionFile = this.requireSessionFile(sessionId, cwd)
+      const sessionFile = await this.requireSessionFile(sessionId, cwd)
 
       if (!opts?.cwd) this.tryAcquireRespawnSlot(sessionId)
 
@@ -299,7 +300,7 @@ export class PiAcpAgent {
         this.lastSessionCwd = cwd
         this.cwds.set(sessionId, cwd)
 
-        const title = readPiSessionTitle(sessionFile)
+        const title = await readPiSessionTitle(sessionFile)
         if (title) await session.publishTitle(title, null)
 
         return session
@@ -399,6 +400,12 @@ export class PiAcpAgent {
     warnAdditionalDirectories('session/new', (params as { additionalDirectories?: unknown }).additionalDirectories)
     const launch = parseLaunchOptions(params._meta)
 
+    // Version discovery runs concurrently with the pi spawn below and never blocks the
+    // loop (no synchronous `pi --version` / `npm view` probes on session/new).
+    const versionProbe: Promise<{ installed: string | null; latest: string | null }> = launch.headless
+      ? Promise.resolve({ installed: null, latest: null })
+      : probeVersions()
+
     this.lastSessionCwd = params.cwd
 
     const fileCommands = loadSlashCommands(params.cwd)
@@ -447,12 +454,12 @@ export class PiAcpAgent {
     const availableModelsAuthErr = maybeAuthRequiredError(availableModelsErr, this.clientCapabilities)
 
     if (availableModelsAuthErr) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw availableModelsAuthErr
     }
 
     if (availableModelsErr) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw RequestError.internalError({}, String((availableModelsErr as Error)?.message ?? availableModelsErr))
     }
 
@@ -460,7 +467,7 @@ export class PiAcpAgent {
     const rawModelsCount = Array.isArray(availableModels?.models) ? availableModels.models.length : 0
 
     if (rawModelsCount === 0) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw RequestError.authRequired(
         {
           authMethods: getAuthMethods({
@@ -473,7 +480,7 @@ export class PiAcpAgent {
     }
 
     if (stateErr && maybeAuthRequiredError(stateErr, this.clientCapabilities)) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw RequestError.authRequired(
         {
           authMethods: getAuthMethods({
@@ -490,7 +497,7 @@ export class PiAcpAgent {
       if (stateErr) throw stateErr
       configuration = await getSessionConfiguration(session.proc, { state, availableModels })
     } catch (err) {
-      this.cleanupFailedNewSession(session.sessionId, state)
+      await this.cleanupFailedNewSession(session.sessionId, state)
       throw (
         maybeAuthRequiredError(err, this.clientCapabilities) ??
         RequestError.internalError({}, String((err as Error)?.message ?? err))
@@ -500,7 +507,8 @@ export class PiAcpAgent {
 
     // Headless children get no banner and no update probe (it runs `npm view`).
     const quietStartup = launch.headless || getQuietStartup(params.cwd)
-    const updateNotice = launch.headless ? null : buildUpdateNotice()
+    const { installed: piVersion, latest } = await versionProbe
+    const updateNotice = buildUpdateNotice(piVersion, latest)
 
     // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
     // the "New version available" notice (if any) since it's high-signal and actionable.
@@ -511,7 +519,8 @@ export class PiAcpAgent {
       : buildStartupInfo({
           cwd: params.cwd,
           fileCommands,
-          updateNotice
+          updateNotice,
+          piVersion
         })
 
     const mcpSection = launch.headless ? null : buildMcpStartupSection(session.mcpInjection)
@@ -820,18 +829,15 @@ export class PiAcpAgent {
 
       if (cmd === 'changelog') {
         // Read pi's installed CHANGELOG.md. Adapter-side, no model call.
-        const findChangelog = (): string | null => {
+        const findChangelog = async (): Promise<string | null> => {
           // 1) Locate the installed pi package by resolving the `pi` executable.
           // On Node installs, `pi` typically resolves to .../@earendil-works/pi-coding-agent/dist/cli.js
           try {
             const whichCmd = process.platform === 'win32' ? 'where' : 'which'
-            const which = spawnSync(whichCmd, ['pi'], { encoding: 'utf-8' })
-            const piPath = String(which.stdout ?? '')
-              .split(/\r?\n/)[0]
-              ?.trim()
+            const piPath = await probeOutput(whichCmd, ['pi'], 800)
 
             if (piPath) {
-              const resolved = realpathSync(piPath)
+              const resolved = realpathSync(piPath.split(/\r?\n/)[0]!.trim())
               const pkgRoot = dirname(dirname(resolved))
               const p = join(pkgRoot, 'CHANGELOG.md')
               if (existsSync(p)) return p
@@ -842,8 +848,7 @@ export class PiAcpAgent {
 
           // 2) Fallback: ask npm where global modules live.
           try {
-            const npmRoot = spawnSync('npm', ['root', '-g'], { encoding: 'utf-8' })
-            const root = String(npmRoot.stdout ?? '').trim()
+            const root = await probeOutput('npm', ['root', '-g'], 800)
             if (root) {
               const p = join(root, '@earendil-works', 'pi-coding-agent', 'CHANGELOG.md')
               if (existsSync(p)) return p
@@ -855,7 +860,7 @@ export class PiAcpAgent {
           return null
         }
 
-        const changelogPath = findChangelog()
+        const changelogPath = await findChangelog()
         if (!changelogPath) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
@@ -1327,7 +1332,7 @@ export class PiAcpAgent {
     }
     warnAdditionalDirectories('session/fork', params.additionalDirectories)
 
-    const sourceFile = this.requireSessionFile(params.sessionId, this.cwds.get(params.sessionId) ?? params.cwd)
+    const sourceFile = await this.requireSessionFile(params.sessionId, this.cwds.get(params.sessionId) ?? params.cwd)
 
     const mcpInjection = params.mcpServers?.length ? prepareMcpInjection(params.mcpServers) : null
     let proc: PiRpcProcess
@@ -1426,12 +1431,12 @@ export class PiAcpAgent {
     // exist (or is already gone) should succeed idempotently.
     // https://agentclientprotocol.com/protocol/v2/session-delete#semantics
     const sessionFile =
-      this.locateSessionFile(params.sessionId, this.cwds.get(params.sessionId)) ??
+      (await this.locateSessionFile(params.sessionId, this.cwds.get(params.sessionId))) ??
       listPiSessions().find(s => s.sessionId === params.sessionId)?.sessionFile
 
     if (sessionFile) {
       try {
-        unlinkSync(sessionFile)
+        await unlink(sessionFile)
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
           throw RequestError.internalError({}, `Failed to delete session: ${String(err)}`)
@@ -1754,58 +1759,48 @@ function buildMcpStartupSection(plan: McpInjectionPlan | null | undefined): stri
   return lines.join('\n')
 }
 
-function buildUpdateNotice(): string | null {
-  // Best-effort update check against npm registry.
-  // Important: keep it fast to not slow down session/new.
+/** Best-effort trimmed stdout of a short-lived probe command; never rejects. */
+async function probeOutput(file: string, args: string[], timeoutMs: number): Promise<string | null> {
   try {
-    const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
-    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
-      /^v/i,
-      ''
-    )
-
-    if (!installed || !isSemver(installed)) return null
-
-    const latestRes = spawnSync('npm', ['view', '@earendil-works/pi-coding-agent', 'version'], {
-      encoding: 'utf-8',
-      timeout: 800
-    })
-    const latest = String(latestRes.stdout ?? '')
-      .trim()
-      .replace(/^v/i, '')
-
-    if (!latest || !isSemver(latest)) return null
-    if (compareSemver(latest, installed) <= 0) return null
-
-    return `New version available: v${latest} (installed v${installed}). Run: \`npm i -g @earendil-works/pi-coding-agent\``
-  } catch {
-    return null
+    const { stdout } = await execFile(file, args, { encoding: 'utf-8', timeout: timeoutMs })
+    return String(stdout ?? '').trim() || null
+  } catch (err: any) {
+    // Non-zero exit still counts (pi prints its version to stdout or stderr).
+    return String(err?.stdout ?? '').trim() || String(err?.stderr ?? '').trim() || null
   }
+}
+
+async function probeVersions(): Promise<{ installed: string | null; latest: string | null }> {
+  const installedRaw = (await probeOutput('pi', ['--version'], 800))?.replace(/^v/i, '') ?? ''
+  if (!installedRaw || !isSemver(installedRaw)) return { installed: null, latest: null }
+  const latestRaw = (await probeOutput('npm', ['view', '@earendil-works/pi-coding-agent', 'version'], 800))?.replace(
+    /^v/i,
+    ''
+  )
+  return { installed: installedRaw, latest: latestRaw && isSemver(latestRaw) ? latestRaw : null }
+}
+
+function buildUpdateNotice(installed: string | null, latest: string | null): string | null {
+  if (!installed || !latest) return null
+  if (compareSemver(latest, installed) <= 0) return null
+  return `New version available: v${latest} (installed v${installed}). Run: \`npm i -g @earendil-works/pi-coding-agent\``
 }
 
 function buildStartupInfo(opts: {
   cwd: string
   fileCommands: ReturnType<typeof loadSlashCommands>
   updateNotice: string | null
+  piVersion: string | null
 }): string {
   void opts.fileCommands
 
   const md: string[] = []
 
   // pi version header
-  try {
-    const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
-    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
-      /^v/i,
-      ''
-    )
-    if (installed) {
-      md.push(`pi v${installed}`)
-      md.push('---')
-      md.push('')
-    }
-  } catch {
-    // ignore
+  if (opts.piVersion) {
+    md.push(`pi v${opts.piVersion}`)
+    md.push('---')
+    md.push('')
   }
 
   const addSection = (title: string, items: string[]) => {
