@@ -83,16 +83,47 @@ type QueuedTurn = {
 /**
  * Map pi's `stats.contextUsage` to an ACP `usage_update`. Returns null whenever pi
  * reports no trustworthy token count (e.g. `tokens: null` right after compaction) or
- * the values are not usable integers.
+ * the values are not usable integers - `used`/`size` are required on every usage_update
+ * by the receiving schema, so the turn's spend can only ride one when occupancy is
+ * known (otherwise it stays on `PromptResponse._meta.piAcp`, never zero-invented).
+ * When `usage` is given (turn completion), the update additionally carries the turn's
+ * spend: pi's per-turn cost (USD, `docs/models-configuration.md`) plus the token
+ * breakdown parents read off acpx `status` events (`_meta.usage`, acpx runtime
+ * `normalizeUsageBreakdown`).
  */
-function toUsageUpdate(stats: PiSessionStats | null | undefined): SessionUpdate | null {
+function toUsageUpdate(stats: PiSessionStats | null | undefined, usage?: TurnSummary['usage']): SessionUpdate | null {
   const used = stats?.contextUsage?.tokens
   const size = stats?.contextUsage?.contextWindow
 
   if (typeof used !== 'number' || !Number.isSafeInteger(used) || used < 0) return null
   if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return null
 
-  return { sessionUpdate: 'usage_update', used, size }
+  const { input, output, cacheRead, cacheWrite, cost } = usage ?? {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: 0
+  }
+  const spendReported = [input, output, cacheRead, cacheWrite, cost].some(v => Number.isFinite(v) && v > 0)
+  return {
+    sessionUpdate: 'usage_update',
+    used,
+    size,
+    ...(spendReported
+      ? {
+          ...(cost > 0 ? { cost: { amount: cost, currency: 'USD' } } : {}),
+          _meta: {
+            usage: {
+              inputTokens: input,
+              outputTokens: output,
+              cachedReadTokens: cacheRead,
+              cachedWriteTokens: cacheWrite
+            }
+          }
+        }
+      : {})
+  }
 }
 
 export type TurnUsage = { totalTokens: number; inputTokens: number; outputTokens: number }
@@ -117,24 +148,6 @@ function emptySummary(): TurnSummary {
     compactions: 0,
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
   }
-}
-
-/**
- * The turn's spend on an ACP `usage_update`: pi's per-turn cost (USD, `docs/models-configuration.md`)
- * plus the token breakdown parents read off acpx `status` events (`_meta.usage`, acpx runtime
- * `normalizeUsageBreakdown`). Null when pi reported nothing, so stubbed turns stay silent.
- */
-function toCostUsageUpdate(usage: TurnSummary['usage']): SessionUpdate | null {
-  const { input, output, cacheRead, cacheWrite, cost } = usage
-  const reported = [input, output, cacheRead, cacheWrite, cost].some(v => Number.isFinite(v) && v > 0)
-  if (!reported) return null
-  return {
-    sessionUpdate: 'usage_update',
-    // `used`/`size` describe context occupancy and travel on the separate context usage_update;
-    // this one carries what spend-accumulating parents read: `cost` and the `_meta.usage` breakdown.
-    ...(cost > 0 ? { cost: { amount: cost, currency: 'USD' } } : {}),
-    _meta: { usage: { inputTokens: input, outputTokens: output, cachedReadTokens: cacheRead, cachedWriteTokens: cacheWrite } }
-  } as unknown as SessionUpdate
 }
 
 function addMessageUsage(summary: TurnSummary, usage: unknown): void {
@@ -809,17 +822,18 @@ export class PiAcpSession {
   }
 
   /**
-   * Best-effort: publish the real pi context-window occupancy as ACP `usage_update`.
+   * Best-effort: publish the real pi context-window occupancy as an ACP `usage_update`,
+   * carrying the turn's spend (per-turn `cost` + `_meta.usage` breakdown) when given.
    * Queued updates are flushed even when the stats query fails or times out, so callers
    * can await this before resolving `session/prompt`.
    */
-  async publishContextUsage(): Promise<PiSessionStats | null> {
+  async publishContextUsage(usage?: TurnSummary['usage']): Promise<PiSessionStats | null> {
     let stats: PiSessionStats | null = null
     try {
       // Older/stubbed pi processes may not expose the stats RPC at all.
       if (typeof this.proc.getSessionStats === 'function') {
         stats = await this.proc.getSessionStats(SESSION_STATS_TIMEOUT_MS)
-        const update = toUsageUpdate(stats)
+        const update = toUsageUpdate(stats, usage)
         if (update) this.emit(update)
       }
     } catch {
@@ -886,12 +900,8 @@ export class PiAcpSession {
     // pi aborts on its own too (settled with aborted:true): still cancelled, flagged in the summary.
     const cancelled = this.cancelRequested || turn.outcome === 'cancelled' || turn.summary.aborted
     this.finishOutstandingTools(this.cancelRequested ? 'Cancelled.' : 'Turn ended before the tool completed.')
-    // Per-turn spend lands before the context snapshot, both before the prompt resolves.
-    const costUpdate = toCostUsageUpdate(turn.summary.usage)
-    if (costUpdate) this.emit(costUpdate)
-    // Ensure all updates derived from pi events (plus the final usage update) are
-    // delivered before we resolve the ACP `session/prompt` request.
-    const postStats = await this.publishContextUsage()
+    // Final usage_update - occupancy plus the turn's spend - before the prompt resolves.
+    const postStats = await this.publishContextUsage(turn.summary.usage)
     if (this.pendingTurn !== turn) return
     if (!this.cancelRequested && this.steering.hasPending) {
       turn.completing = false
